@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.*;
 import java.io.File;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -36,9 +37,10 @@ public class ClipController {
     public ResponseEntity<Map<String, Object>> getClip(@PathVariable String clipId) {
         return clipService.getClip(clipId)
                 .map(clip -> {
-                    Map<String, Object> data = Map.of("clip", clip);
+                    Map<String, Object> data = new HashMap<>();
+                    data.put("clip", clip);
                     clipService.getClipScore(clipId).ifPresent(score -> {
-                        ((Map<String, Object>) data).put("scoreBreakdown", score);
+                        data.put("scoreBreakdown", score);
                     });
                     return ResponseEntity.ok(Map.of("status", "ok", "data", data));
                 })

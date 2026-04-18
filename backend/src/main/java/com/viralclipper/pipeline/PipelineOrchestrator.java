@@ -120,13 +120,21 @@ public class PipelineOrchestrator {
                     appConfig.getYtdlpPath(),
                     "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
                     "--merge-output-format", "mp4",
+                    "--no-warnings",
                     "-o", outputPath,
                     video.getSourceUrl()
             );
             pb.redirectErrorStream(true);
             Process p = pb.start();
+            try (var reader = new java.io.BufferedReader(new java.io.InputStreamReader(p.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    log.info("[yt-dlp] {}", line);
+                }
+            }
             int exit = p.waitFor();
-            if (exit != 0) throw new RuntimeException("yt-dlp download failed");
+            if (exit != 0) throw new RuntimeException("yt-dlp download failed (exit=" + exit + ")");
+            if (!new File(outputPath).exists()) throw new RuntimeException("Downloaded file not found: " + outputPath);
             video.setFilePath(outputPath);
             videoRepository.save(video);
             return outputPath;
@@ -149,8 +157,11 @@ public class PipelineOrchestrator {
         );
         pb.redirectErrorStream(true);
         Process p = pb.start();
+        try (var reader = new java.io.BufferedReader(new java.io.InputStreamReader(p.getInputStream()))) {
+            while (reader.readLine() != null) {}
+        }
         int exit = p.waitFor();
-        if (exit != 0) throw new RuntimeException("ffmpeg audio extraction failed");
+        if (exit != 0) throw new RuntimeException("ffmpeg audio extraction failed (exit=" + exit + ")");
         return audioPath;
     }
 

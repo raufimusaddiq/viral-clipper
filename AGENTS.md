@@ -96,16 +96,11 @@ cd ai-pipeline
 | GET | /api/clips/{id}/export | Download exported clip |
 
 ## Git Strategy
-- **Repo**: Monorepo (all in one). GitHub: `raufimusaddiq/viral-clipper` (private)
-- **Branch**: `master` is stable. Feature branches: `feat/short-description`
-- **Commit style**: Conventional commits — `feat:`, `fix:`, `chore:`, `docs:`, `test:`, `refactor:`
-- **Merge**: `git merge --no-ff feat/xxx` (always merge commit, never rebase shared branches)
-- **Commit rules**:
-  - NEVER commit unless user explicitly asks
-  - NEVER push unless user explicitly asks
-  - ALWAYS run tests before committing
-  - NEVER commit secrets (.env, credentials)
-- **Git config (set)**: `pull.rebase true`, `push.autoSetupRemote true`, `merge.conflictStyle zdiff3`, `rerere.enabled true`
-- **Use `git switch`** over `git checkout`, `git restore` over `git checkout -- file`
+- **Repo**: `raufimusaddiq/viral-clipper` (private monorepo)
+- **Branch**: `master` stable. Feature: `feat/short-description`
+- **Commit**: Conventional — `feat:`, `fix:`, `chore:`, `docs:`, `test:`, `refactor:`
+- **Merge**: `--no-ff` always. Never rebase shared branches.
+- **NEVER** commit/push unless user asks. **ALWAYS** test first. **NEVER** commit secrets.
+- Git skill installed (`mastering-git-cli`) — use it for all git operations.
 
 ## See journal for: architecture, stack, docker, scoring, decisions, session history

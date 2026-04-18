@@ -19,6 +19,7 @@ def escape_drawtext(text):
         .replace(",", "\\,")
         .replace("[", "\\[")
         .replace("]", "\\]")
+        .replace("%", "%%")
     )
 
 
@@ -50,7 +51,7 @@ def build_word_timeline(segments, clip_start, clip_end):
     return words
 
 
-def build_subtitle_filter(words, max_chars=5, fontsize=40):
+def build_subtitle_filter(words, max_chars=3, fontsize=52):
     if not words:
         return "null"
     phrases = []
@@ -74,9 +75,11 @@ def build_subtitle_filter(words, max_chars=5, fontsize=40):
     filters = []
     for text, t_start, t_end in phrases:
         filters.append(
-            f"drawtext=text='{text}':fontsize={fontsize}:fontcolor=white:"
-            f"borderw=3:bordercolor=black:"
-            f"x=(w-text_w)/2:y=h*0.75:"
+            f"drawtext=text='{text}':"
+            f"fontsize={fontsize}:fontcolor=yellow:"
+            f"borderw=4:bordercolor=black:"
+            f"shadowcolor=black@0.5:shadowx=2:shadowy=2:"
+            f"x=(w-text_w)/2:y=h*0.70:"
             f"enable='between(t,{t_start:.3f},{t_end:.3f})'"
         )
     return ",".join(filters)

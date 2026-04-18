@@ -23,12 +23,40 @@ WEIGHTS = {
 HOOK_PHRASES = [
     "rahasia", "penting", "perhatikan", "simak", "tahukah kamu",
     "tidak banyak orang tahu", "jangan", "wajib", "harus",
+    "kamu tahu tidak", "coba bayangkan", "faktanya", "sesuatu yang",
+    "gila", "luar biasa", "aneh", "mengejutkan",
 ]
 
 KEYWORD_TRIGGERS = [
     "rahasia", "penting", "tidak banyak orang tahu", "kesalahan", "ternyata",
     "wajib", "harus", "jangan", "bahaya", "untung", "sayangnya", "fakta",
     "curhat", "jebakan", "trik", "hack", "tip", "solusi",
+    "bohong", "benar", "buktinya", "nyata", "gue", "lu", "lo",
+    "banget", "parah", "gila", "serius", "beneran",
+    "unik", "aneh", "langka", "jarang", "mustahil",
+    "mengubah", "menginspirasi", "membuktikan", "membongkar",
+]
+
+EMOTION_WORDS = [
+    "sedih", "marah", "kaget", "wow", "amazing", "senang", "kecewa",
+    "bangga", "takut", "haru", "marah", "benci", "cinta", "panic",
+    "shock", "greget", "geram", "syukur", "bersyukur", "penasaran",
+]
+
+CONVERSATION_MARKERS = [
+    "kan", "ya", "dong", "sih", "kok", "nih", "tuh", "deh",
+    "loh", "nah", "duh", "aduh", "wah", "ih", "eh",
+]
+
+CONFLICT_WORDS = [
+    "tapi", "namun", "sebenarnya", "beda sama", "salah", "benar",
+    "memang", "boleh dibilang", "sebaliknya", "padahal", "ternyata",
+    "malah", "justru", "nyatanya",
+]
+
+QUESTION_WORDS = [
+    "apa", "kenapa", "kok", "bagaimana", "kapan", "siapa", "dimana",
+    "berapa", "mengapa", "gimana",
 ]
 
 BOOST_CONDITIONS = {
@@ -48,62 +76,109 @@ PENALTY_CONDITIONS = {
 
 def score_hook_strength(text):
     first_sentence = text.split(".")[0] if "." in text else text.split(",")[0]
+    lower = first_sentence.lower()
     is_question = "?" in first_sentence
-    has_hook = any(p in first_sentence.lower() for p in HOOK_PHRASES)
+    has_hook = any(p in lower for p in HOOK_PHRASES)
+    has_question_word = any(w in lower.split() for w in QUESTION_WORDS[:5])
     is_short = len(first_sentence.split()) < 10
 
     if is_question and has_hook:
         return 1.0
+    if has_hook and is_short:
+        return 0.9
     if is_question or has_hook:
         return 0.7
+    if has_question_word:
+        return 0.6
     if is_short:
         return 0.4
-    return 0.3
+    return 0.2
 
 
 def score_keyword_trigger(text):
     lower = text.lower()
     count = sum(1 for kw in KEYWORD_TRIGGERS if kw in lower)
-    if count >= 3:
+    density = count / max(len(text.split()) / 10, 1)
+    if count >= 4 or density > 0.8:
         return 1.0
+    if count >= 3:
+        return 0.85
     if count == 2:
-        return 0.7
+        return 0.65
     if count == 1:
         return 0.4
-    return 0.0
+    return 0.1
 
 
 def score_novelty(text):
-    s = 0.2
+    s = 0.15
+    lower = text.lower()
     if any(c.isdigit() for c in text):
-        s += 0.3
-    if any(w[0].isupper() for w in text.split() if len(w) > 3):
-        s += 0.3
-    step_words = ["pertama", "kedua", "ketiga", "keempat", "pertama-tama"]
-    if any(w in text.lower() for w in step_words):
+        s += 0.25
+    proper_nouns = sum(1 for w in text.split() if len(w) > 3 and w[0].isupper())
+    if proper_nouns >= 2:
+        s += 0.25
+    elif proper_nouns >= 1:
+        s += 0.15
+    step_words = ["pertama", "kedua", "ketiga", "keempat", "terakhir"]
+    if any(w in lower for w in step_words):
+        s += 0.2
+    surprise_words = ["ternyata", "nyatanya", "faktanya", "malah", "justru", "bohong"]
+    if any(w in lower for w in surprise_words):
         s += 0.2
     return min(s, 1.0)
 
 
 def score_clarity(duration, text):
-    if duration < 30:
+    if duration < 15:
         base = 0.9
+    elif duration < 30:
+        base = 0.85
     elif duration < 45:
-        base = 0.6
+        base = 0.7
+    elif duration < 60:
+        base = 0.55
     else:
         base = 0.4
-    context_words = ["jadi", "maksudnya", "singkatnya", "intinya"]
+    context_words = ["jadi", "maksudnya", "singkatnya", "intinya", "artinya", "maksud gue"]
     if any(w in text.lower() for w in context_words):
-        base = min(base + 0.2, 1.0)
+        base = min(base + 0.15, 1.0)
     return base
 
 
-def score_emotional_energy():
+def score_emotional_energy(text):
+    lower = text.lower()
+    count = sum(1 for w in EMOTION_WORDS if w in lower)
+    excl = text.count("!")
+    caps_words = sum(1 for w in text.split() if w.isupper() and len(w) > 2)
+    score = 0.3
+    if count >= 3:
+        score += 0.4
+    elif count >= 2:
+        score += 0.3
+    elif count >= 1:
+        score += 0.2
+    if excl >= 2:
+        score += 0.15
+    elif excl >= 1:
+        score += 0.1
+    if caps_words >= 2:
+        score += 0.1
+    return min(score, 1.0)
+
+
+def score_pause_structure(text, duration):
+    word_count = len(text.split())
+    if word_count == 0:
+        return 0.3
+    words_per_sec = word_count / max(duration, 1)
+    if 2.0 <= words_per_sec <= 4.0:
+        return 0.9
+    if 1.5 <= words_per_sec <= 5.0:
+        return 0.7
+    if words_per_sec < 1.5:
+        return 0.4
     return 0.5
-
-
-def score_pause_structure():
-    return 0.6
 
 
 def score_face_presence():
@@ -137,16 +212,14 @@ def calc_boosts(text):
     lower = text.lower()
     first_sentence = text.split(".")[0] if "." in text else text
 
-    if "?" in first_sentence and any(w in first_sentence.lower() for w in ["kok", "kenapa", "bagaimana", "apa"]):
+    if "?" in first_sentence and any(w in first_sentence.lower() for w in QUESTION_WORDS):
         total += BOOST_CONDITIONS["sharp_question"]
-    conflict_words = ["tapi", "namun", "sebenarnya", "beda sama"]
-    if any(w in lower for w in conflict_words):
+    if any(w in lower for w in CONFLICT_WORDS):
         total += BOOST_CONDITIONS["opinion_conflict"]
     list_words = ["pertama", "kedua", "ketiga", "1", "2", "3"]
     if any(w in lower for w in list_words):
         total += BOOST_CONDITIONS["number_list"]
-    emotion_words = ["sedih", "marah", "kaget", "wow", "amazing"]
-    if any(w in lower for w in emotion_words):
+    if any(w in lower for w in EMOTION_WORDS):
         total += BOOST_CONDITIONS["emotional_moment"]
     return round(total, 2)
 
@@ -186,8 +259,8 @@ def score_segment(segment, niche_keywords=None):
         "keywordTrigger": score_keyword_trigger(text),
         "novelty": score_novelty(text),
         "clarity": score_clarity(duration, text),
-        "emotionalEnergy": score_emotional_energy(),
-        "pauseStructure": score_pause_structure(),
+        "emotionalEnergy": score_emotional_energy(text),
+        "pauseStructure": score_pause_structure(text, duration),
         "facePresence": score_face_presence(),
         "sceneChange": score_scene_change(),
         "topicFit": score_topic_fit(text, niche_keywords),

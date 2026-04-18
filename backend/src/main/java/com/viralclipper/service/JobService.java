@@ -16,7 +16,8 @@ public class JobService {
 
     private static final Logger log = LoggerFactory.getLogger(JobService.class);
     private static final List<String> STAGES = List.of(
-            "IMPORT", "AUDIO_EXTRACT", "TRANSCRIBE", "SEGMENT", "SCORE", "RENDER", "SUBTITLE"
+            "IMPORT", "AUDIO_EXTRACT", "TRANSCRIBE", "SEGMENT", "SCORE",
+            "RENDER", "SUBTITLE", "VARIATION", "ANALYTICS"
     );
 
     private final JobRepository jobRepository;

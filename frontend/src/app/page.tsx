@@ -25,7 +25,7 @@ type Job = {
 type StageStatus = {
   id: string;
   jobId: string;
-  stageName: string;
+  stage: string;
   status: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -166,7 +166,7 @@ function ProgressBar({ stages }: { stages: StageStatus[] }) {
   return (
     <div className="space-y-2">
       <div className="flex justify-between text-xs text-zinc-400">
-        <span>{current ? STAGE_LABELS[current.stageName] || current.stageName : 'Waiting...'}</span>
+        <span>{current ? STAGE_LABELS[current.stage] || current.stage : 'Waiting...'}</span>
         <span>{pct}%</span>
       </div>
       <div className="h-2 bg-zinc-800 rounded-full overflow-hidden">
@@ -174,7 +174,7 @@ function ProgressBar({ stages }: { stages: StageStatus[] }) {
       </div>
       <div className="grid grid-cols-3 gap-1 mt-2">
         {STAGE_ORDER.map((stage) => {
-          const stageStatus = stages.find(s => s.stageName === stage);
+          const stageStatus = stages.find(s => s.stage === stage);
           const status = stageStatus?.status || 'PENDING';
           const isCurrent = status === 'RUNNING' || status === 'IN_PROGRESS';
           const isDone = status === 'COMPLETED';
@@ -238,17 +238,38 @@ function TranscriptView({ clips, filterTier }: { clips: Clip[]; filterTier: stri
 
 function ClipCard({
   clip, score, previewing, onPreview, onExport, api,
+  selectable, selected, onSelect,
 }: {
   clip: Clip; score?: ClipScore; previewing: boolean;
   onPreview: () => void; onExport: () => void; api: ApiClient;
+  selectable?: boolean; selected?: boolean; onSelect?: () => void;
 }) {
   const [showScore, setShowScore] = useState(false);
 
   return (
-    <div className="bg-zinc-800/50 rounded-lg overflow-hidden border border-zinc-700/50 hover:border-zinc-600 transition-colors">
+    <div className={`bg-zinc-800/50 rounded-lg overflow-hidden border transition-colors ${
+      selected ? 'border-blue-500 ring-1 ring-blue-500/30' : 'border-zinc-700/50 hover:border-zinc-600'
+    }`}>
       <div className="p-4">
         <div className="flex items-start justify-between mb-2">
           <div className="flex items-center gap-2">
+            {selectable && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onSelect?.(); }}
+                className={`w-5 h-5 rounded flex items-center justify-center border transition-colors flex-shrink-0 ${
+                  selected
+                    ? 'bg-blue-600 border-blue-500 text-white'
+                    : 'bg-zinc-900 border-zinc-600 hover:border-zinc-400'
+                }`}
+                aria-label="Select clip"
+              >
+                {selected && (
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                  </svg>
+                )}
+              </button>
+            )}
             <span className="text-lg font-bold text-zinc-100">#{clip.rankPos || '-'}</span>
             <span className={`px-2 py-0.5 rounded text-xs font-medium border ${TIER_COLORS[clip.tier] || ''}`}>
               {tierLabel(clip.tier)}
@@ -645,23 +666,21 @@ export default function Home() {
                           {tab === 'clips' && (
                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                               {filteredClips.map(clip => (
-                                <div key={clip.id} className="relative">
-                                  {hasRendered && (
-                                    <input type="checkbox" checked={selectedClips.has(clip.id)} onChange={() => {
-                                      const next = new Set(selectedClips);
-                                      if (next.has(clip.id)) next.delete(clip.id); else next.add(clip.id);
-                                      setSelectedClips(next);
-                                    }} className="absolute top-2 left-2 z-10 w-4 h-4 rounded border-zinc-600 bg-zinc-800 text-blue-600 focus:ring-blue-500" />
-                                  )}
-                                  <ClipCard clip={clip} score={clipScores[clip.id]} previewing={previewingClip === clip.id}
-                                    onPreview={() => setPreviewingClip(previewingClip === clip.id ? null : clip.id)}
-                                    onExport={() => {
-                                      api.exportClips([clip.id]).then(async () => {
-                                        const clips = await fetchClipsForVideo(group.video.id);
-                                        setVideoGroups(prev => prev.map(g => g.video.id === group.video.id ? { ...g, clips } : g));
-                                      });
-                                    }} api={api} />
-                                </div>
+                                <ClipCard key={clip.id} clip={clip} score={clipScores[clip.id]} previewing={previewingClip === clip.id}
+                                  selectable={!!clip.renderPath}
+                                  selected={selectedClips.has(clip.id)}
+                                  onSelect={() => {
+                                    const next = new Set(selectedClips);
+                                    if (next.has(clip.id)) next.delete(clip.id); else next.add(clip.id);
+                                    setSelectedClips(next);
+                                  }}
+                                  onPreview={() => setPreviewingClip(previewingClip === clip.id ? null : clip.id)}
+                                  onExport={() => {
+                                    api.exportClips([clip.id]).then(async () => {
+                                      const clips = await fetchClipsForVideo(group.video.id);
+                                      setVideoGroups(prev => prev.map(g => g.video.id === group.video.id ? { ...g, clips } : g));
+                                    });
+                                  }} api={api} />
                               ))}
                             </div>
                           )}
