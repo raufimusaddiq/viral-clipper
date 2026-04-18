@@ -1,0 +1,64 @@
+# === Data / Media ===
+data/
+!data/.gitkeep
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+*.cover
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# === Node.js / Next.js ===
+node_modules/
+.next/
+out/
+frontend/node_modules/
+frontend/.next/
+frontend/test-results/
+frontend/playwright-report/
+frontend/blob-report/
+frontend/coverage/
+
+# === Java / Maven ===
+backend/target/
+*.jar
+*.war
+*.class
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# === IDE ===
+.idea/
+.vscode/
+.opencode/
+opencode.json
+*.iml
+*.swo
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# === Environment / Secrets ===
+.env
+!.env.example
+!.env.docker
+
+# === Docker ===
+docker-compose.override.yml
+
+# === OS ===
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
