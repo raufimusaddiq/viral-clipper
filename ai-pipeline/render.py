@@ -41,6 +41,7 @@ def main():
     parser.add_argument("--video", required=True, help="Path to source video file")
     parser.add_argument("--output-dir", required=True, help="Directory for rendered clips")
     parser.add_argument("--tiers", default="PRIMARY,BACKUP", help="Comma-separated tiers to render")
+    parser.add_argument("--clip-index", type=int, default=-1, help="Render only this clip index (0-based)")
     args = parser.parse_args()
 
     try:
@@ -50,6 +51,12 @@ def main():
         tiers = [t.strip() for t in args.tiers.split(",")]
         segments = data.get("scoredSegments", [])
         to_render = [s for s in segments if s.get("tier") in tiers]
+
+        if args.clip_index >= 0:
+            if args.clip_index < len(to_render):
+                to_render = [to_render[args.clip_index]]
+            else:
+                to_render = []
 
         os.makedirs(args.output_dir, exist_ok=True)
         rendered = []

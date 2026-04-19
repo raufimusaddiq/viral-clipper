@@ -121,6 +121,24 @@ public class PipelineOrchestrator {
     private String stageImport(Job job, Video video) throws Exception {
         if ("YOUTUBE".equals(video.getSourceType())) {
             String outputPath = appConfig.getDataDir() + "/raw/" + video.getId() + ".mp4";
+
+            ProcessBuilder titlePb = new ProcessBuilder(appConfig.getYtdlpPath(), "--print", "title", "--no-warnings", video.getSourceUrl());
+            titlePb.redirectErrorStream(true);
+            Process titleProc = titlePb.start();
+            StringBuilder titleBuilder = new StringBuilder();
+            try (var reader = new java.io.BufferedReader(new java.io.InputStreamReader(titleProc.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (titleBuilder.length() > 0) titleBuilder.append(" ");
+                    titleBuilder.append(line);
+                }
+            }
+            titleProc.waitFor();
+            String title = titleBuilder.toString().trim();
+            if (!title.isEmpty()) {
+                video.setTitle(title);
+            }
+
             ProcessBuilder pb = new ProcessBuilder(
                     appConfig.getYtdlpPath(),
                     "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
@@ -263,16 +281,55 @@ public class PipelineOrchestrator {
     private String stageRender(Job job, Video video) throws Exception {
         String segmentsPath = appConfig.getDataDir() + "/segments/" + video.getId() + ".json";
         String renderDir = appConfig.getDataDir() + "/renders/";
+        new java.io.File(renderDir).mkdirs();
 
-        List<String> args = List.of(
-                "--segments", segmentsPath,
-                "--video", video.getFilePath(),
-                "--output-dir", renderDir
-        );
+        String segJson = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(segmentsPath)));
+        JsonNode segData = objectMapper.readTree(segJson);
+        JsonNode scored = segData.path("scoredSegments");
+        List<String> tiers = List.of("PRIMARY", "BACKUP");
+        List<Integer> toRender = new java.util.ArrayList<>();
+        for (int i = 0; i < scored.size(); i++) {
+            String tier = scored.get(i).path("tier").asText("");
+            if (tiers.contains(tier)) toRender.add(i);
+        }
 
-        JsonNode result = pythonRunner.runScript("render.py", args);
+        StageStatus renderStage = stageStatusRepository.findByJobId(job.getId()).stream()
+                .filter(s -> "RENDER".equals(s.getStage())).findFirst().orElse(null);
 
-        updateClipRenderStatuses(video.getId(), result);
+        int rendered = 0, failed = 0;
+        for (int idx : toRender) {
+            Job fresh = jobRepository.findById(job.getId()).orElse(job);
+            if ("CANCELLED".equals(fresh.getStatus())) {
+                throw new RuntimeException("Job cancelled by user");
+            }
+
+            List<String> args = List.of(
+                    "--segments", segmentsPath,
+                    "--video", video.getFilePath(),
+                    "--output-dir", renderDir,
+                    "--clip-index", String.valueOf(idx)
+            );
+
+            try {
+                JsonNode result = pythonRunner.runScript("render.py", args);
+                updateClipRenderStatuses(video.getId(), result);
+                rendered++;
+            } catch (Exception e) {
+                failed++;
+                log.warn("Render failed for clip index {}: {}", idx, e.getMessage());
+            }
+
+            if (renderStage != null) {
+                renderStage.setOutputPath("Rendering " + (rendered + failed) + "/" + toRender.size() + " clips");
+                stageStatusRepository.save(renderStage);
+            }
+        }
+
+        if (renderStage != null) {
+            renderStage.setOutputPath(rendered + " rendered, " + failed + " failed");
+            stageStatusRepository.save(renderStage);
+        }
+
         return renderDir;
     }
 
