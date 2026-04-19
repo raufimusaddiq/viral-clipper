@@ -42,6 +42,8 @@ type Clip = {
   endTime: number;
   durationSec: number;
   textContent: string | null;
+  title: string | null;
+  description: string | null;
   renderStatus: string;
   renderPath: string | null;
   exportStatus: string;
@@ -55,6 +57,7 @@ type ClipScore = {
   novelty: number | null;
   clarity: number | null;
   emotionalEnergy: number | null;
+  textSentiment: number | null;
   pauseStructure: number | null;
   facePresence: number | null;
   sceneChange: number | null;
@@ -252,6 +255,35 @@ function ClipCard({
   selectable?: boolean; selected?: boolean; onSelect?: () => void;
 }) {
   const [showScore, setShowScore] = useState(false);
+  const [showFeedback, setShowFeedback] = useState(false);
+  const [showMeta, setShowMeta] = useState(false);
+  const [feedback, setFeedback] = useState({ views: '', likes: '', comments: '', shares: '', saves: '' });
+  const [submitting, setSubmitting] = useState(false);
+  const [viralScore, setViralScore] = useState<number | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const handleCopy = async (text: string, label: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopied(label);
+    setTimeout(() => setCopied(null), 1500);
+  };
+
+  const handleSubmitFeedback = async () => {
+    setSubmitting(true);
+    try {
+      const result = await api.submitFeedback(clip.id, {
+        views: parseInt(feedback.views) || 0,
+        likes: parseInt(feedback.likes) || 0,
+        comments: parseInt(feedback.comments) || 0,
+        shares: parseInt(feedback.shares) || 0,
+        saves: parseInt(feedback.saves) || 0,
+      });
+      const data = result as { viralScore: number };
+      setViralScore(data.viralScore);
+    } catch {} finally {
+      setSubmitting(false);
+    }
+  };
 
   return (
     <div className={`bg-zinc-800/50 rounded-lg overflow-hidden border transition-colors ${
@@ -287,9 +319,12 @@ function ClipCard({
             <div className="text-xs text-zinc-500">score</div>
           </div>
         </div>
+        {clip.title && (
+          <p className="text-sm font-medium text-zinc-200 mb-1 line-clamp-2">{clip.title}</p>
+        )}
         <div className="flex gap-4 text-xs text-zinc-400 mb-3">
-          <span>{formatTime(clip.startTime)} \u2192 {formatTime(clip.endTime)}</span>
-          <span>\u2022</span>
+          <span>{formatTime(clip.startTime)} &#8594; {formatTime(clip.endTime)}</span>
+          <span>&#8226;</span>
           <span>{formatDuration(clip.durationSec)}</span>
         </div>
         {clip.textContent && (
@@ -306,14 +341,74 @@ function ClipCard({
               {showScore ? 'Hide' : 'Score'}
             </button>
           )}
+          {(clip.title || clip.description) && (
+            <button onClick={() => setShowMeta(!showMeta)} className="flex-1 py-1.5 rounded text-xs font-medium bg-purple-700 text-zinc-200 hover:bg-purple-600 transition-colors">
+              {showMeta ? 'Hide' : 'Copy'}
+            </button>
+          )}
           {clip.exportPath && (
             <a href={api.getExportUrl(clip.id)} className="flex-1 py-1.5 rounded text-xs font-medium bg-green-700 text-white hover:bg-green-600 transition-colors text-center">Download</a>
           )}
           {!clip.exportPath && clip.renderStatus === 'COMPLETED' && (
             <button onClick={onExport} className="flex-1 py-1.5 rounded text-xs font-medium bg-zinc-700 text-zinc-300 hover:bg-zinc-600 transition-colors">Export</button>
           )}
+          <button onClick={() => setShowFeedback(!showFeedback)} className="py-1.5 px-2 rounded text-xs font-medium bg-zinc-700 text-zinc-400 hover:bg-zinc-600 transition-colors">
+            {viralScore !== null ? `${(viralScore * 100).toFixed(0)}%` : 'FB'}
+          </button>
         </div>
       </div>
+      {showMeta && (clip.title || clip.description) && (
+        <div className="border-t border-zinc-700/50 px-4 py-3 space-y-2">
+          {clip.title && (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-zinc-500 font-medium">Title</span>
+                <button onClick={() => handleCopy(clip.title!, 'title')} className="text-xs text-blue-400 hover:text-blue-300">
+                  {copied === 'title' ? 'Copied!' : 'Copy'}
+                </button>
+              </div>
+              <p className="text-sm text-zinc-200 bg-zinc-900/50 rounded p-2">{clip.title}</p>
+            </div>
+          )}
+          {clip.description && (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-zinc-500 font-medium">Description</span>
+                <button onClick={() => handleCopy(clip.description!, 'desc')} className="text-xs text-blue-400 hover:text-blue-300">
+                  {copied === 'desc' ? 'Copied!' : 'Copy'}
+                </button>
+              </div>
+              <p className="text-sm text-zinc-300 bg-zinc-900/50 rounded p-2 whitespace-pre-wrap">{clip.description}</p>
+            </div>
+          )}
+        </div>
+      )}
+      {showFeedback && (
+        <div className="border-t border-zinc-700/50 px-4 py-3 space-y-2">
+          <span className="text-xs text-zinc-500 font-medium">TikTok Performance</span>
+          <div className="grid grid-cols-5 gap-1">
+            <input type="number" placeholder="Views" value={feedback.views} onChange={e => setFeedback(f => ({...f, views: e.target.value}))}
+              className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 w-full" />
+            <input type="number" placeholder="Likes" value={feedback.likes} onChange={e => setFeedback(f => ({...f, likes: e.target.value}))}
+              className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 w-full" />
+            <input type="number" placeholder="Comments" value={feedback.comments} onChange={e => setFeedback(f => ({...f, comments: e.target.value}))}
+              className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 w-full" />
+            <input type="number" placeholder="Shares" value={feedback.shares} onChange={e => setFeedback(f => ({...f, shares: e.target.value}))}
+              className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 w-full" />
+            <input type="number" placeholder="Saves" value={feedback.saves} onChange={e => setFeedback(f => ({...f, saves: e.target.value}))}
+              className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 w-full" />
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={handleSubmitFeedback} disabled={submitting}
+              className="px-3 py-1 rounded text-xs font-medium bg-blue-600 text-white hover:bg-blue-500 disabled:bg-zinc-700 disabled:text-zinc-500 transition-colors">
+              {submitting ? 'Saving...' : 'Submit'}
+            </button>
+            {viralScore !== null && (
+              <span className="text-xs text-green-400">Viral Score: {(viralScore * 100).toFixed(1)}%</span>
+            )}
+          </div>
+        </div>
+      )}
       {showScore && score && (
         <div className="border-t border-zinc-700/50 px-4 py-3 space-y-1">
           <ScoreBadge score={score.hookStrength} label="Hook" />
@@ -321,6 +416,7 @@ function ClipCard({
           <ScoreBadge score={score.novelty} label="Novelty" />
           <ScoreBadge score={score.clarity} label="Clarity" />
           <ScoreBadge score={score.emotionalEnergy} label="Energy" />
+          <ScoreBadge score={score.textSentiment} label="Sentiment" />
           <ScoreBadge score={score.pauseStructure} label="Pauses" />
           <ScoreBadge score={score.facePresence} label="Face" />
           <ScoreBadge score={score.sceneChange} label="Scenes" />
@@ -349,7 +445,7 @@ type DiscoveredVideo = {
 };
 
 type DiscoveryMode = 'search' | 'trending' | 'channel';
-type MainTab = 'import' | 'discovery';
+type MainTab = 'import' | 'discovery' | 'learning';
 type TabKey = 'clips' | 'transcript';
 
 function formatDurationSec(seconds: number): string {
@@ -523,6 +619,8 @@ export default function Home() {
   const [expandedVideos, setExpandedVideos] = useState<Set<string>>(new Set());
   const [activeTabs, setActiveTabs] = useState<Record<string, TabKey>>({});
   const [filterTiers, setFilterTiers] = useState<Record<string, string>>({});
+  const [learningStats, setLearningStats] = useState<{ version: number; trained_on: number; total_feedback: number; with_actual_scores: number } | null>(null);
+  const [training, setTraining] = useState(false);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [initialLoad, setInitialLoad] = useState(true);
 
@@ -607,6 +705,16 @@ export default function Home() {
       } else if (groups.length > 0 && groups[0].clips.length > 0) {
         setExpandedVideos(prev => new Set([...prev, groups[0].video.id]));
       }
+
+      try {
+        const ws = await api.getWeightsStatus() as Record<string, unknown>;
+        setLearningStats({
+          version: ws.version as number,
+          trained_on: ws.trained_on as number,
+          total_feedback: ws.total_feedback as number,
+          with_actual_scores: ws.with_actual_scores as number,
+        });
+      } catch {}
     } catch {}
     setInitialLoad(false);
   }, [api, fetchClipsForVideo]);
@@ -706,10 +814,15 @@ export default function Home() {
       <div className="flex gap-2 mb-6">
         <button onClick={() => setMainTab('import')} className={`px-6 py-2.5 rounded text-sm font-medium transition-colors ${
           mainTab === 'import' ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
-        }`}>Import & Clips</button>
+        }}}>Import & Clips</button>
         <button onClick={() => setMainTab('discovery')} className={`px-6 py-2.5 rounded text-sm font-medium transition-colors ${
           mainTab === 'discovery' ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
-        }`}>Discover</button>
+        }}}>Discover</button>
+        <button onClick={() => setMainTab('learning')} className={`px-6 py-2.5 rounded text-sm font-medium transition-colors ${
+          mainTab === 'learning' ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+        }}}>
+          Learning {learningStats && learningStats.with_actual_scores > 0 ? `(${learningStats.with_actual_scores})` : ''}
+        </button>
       </div>
 
       {mainTab === 'import' && (
@@ -939,6 +1052,62 @@ export default function Home() {
           setMainTab('import');
           await loadAllData();
         }} />
+      )}
+
+      {mainTab === 'learning' && (
+        <section className="space-y-4">
+          <div className="bg-zinc-900 rounded-lg p-6">
+            <h2 className="text-xl font-semibold mb-4">Self-Learning Scoring</h2>
+            <p className="text-sm text-zinc-400 mb-4">
+              Submit TikTok performance data for your clips to train the scoring weights. After enough feedback, the system will automatically adjust which features matter most.
+            </p>
+            {learningStats && (
+              <div className="grid grid-cols-4 gap-4 mb-6">
+                <div className="bg-zinc-800 rounded-lg p-4 text-center">
+                  <div className="text-2xl font-bold text-zinc-100">{learningStats.total_feedback}</div>
+                  <div className="text-xs text-zinc-500">Total Feedback</div>
+                </div>
+                <div className="bg-zinc-800 rounded-lg p-4 text-center">
+                  <div className="text-2xl font-bold text-green-400">{learningStats.with_actual_scores}</div>
+                  <div className="text-xs text-zinc-500">With TikTok Data</div>
+                </div>
+                <div className="bg-zinc-800 rounded-lg p-4 text-center">
+                  <div className="text-2xl font-bold text-blue-400">v{learningStats.version}</div>
+                  <div className="text-xs text-zinc-500">Weight Version</div>
+                </div>
+                <div className="bg-zinc-800 rounded-lg p-4 text-center">
+                  <div className="text-2xl font-bold text-yellow-400">{learningStats.trained_on}</div>
+                  <div className="text-xs text-zinc-500">Trained Samples</div>
+                </div>
+              </div>
+            )}
+            <div className="flex gap-3">
+              <button onClick={async () => {
+                setTraining(true);
+                try {
+                  await api.trainWeights();
+                  const ws = await api.getWeightsStatus() as Record<string, unknown>;
+                  setLearningStats({
+                    version: ws.version as number,
+                    trained_on: ws.trained_on as number,
+                    total_feedback: ws.total_feedback as number,
+                    with_actual_scores: ws.with_actual_scores as number,
+                  });
+                } catch {} finally {
+                  setTraining(false);
+                }
+              }} disabled={training || !learningStats || learningStats.with_actual_scores < 5}
+                className="px-6 py-2.5 rounded text-sm font-medium bg-blue-600 text-white hover:bg-blue-500 disabled:bg-zinc-700 disabled:text-zinc-500 transition-colors">
+                {training ? 'Training...' : 'Retrain Weights'}
+              </button>
+              {learningStats && learningStats.with_actual_scores < 5 && (
+                <span className="text-xs text-zinc-500 py-2">
+                  Need {5 - learningStats.with_actual_scores} more clips with feedback data to enable training
+                </span>
+              )}
+            </div>
+          </div>
+        </section>
       )}
 
       {previewingClip && (

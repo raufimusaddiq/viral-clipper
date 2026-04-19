@@ -33,13 +33,15 @@ public class PipelineOrchestrator {
     private final ClipScoreRepository clipScoreRepository;
     private final PythonRunner pythonRunner;
     private final ObjectMapper objectMapper;
+    private final com.viralclipper.service.FeedbackService feedbackService;
 
     public PipelineOrchestrator(AppConfig appConfig, JobRepository jobRepository,
                                 StageStatusRepository stageStatusRepository,
                                 VideoRepository videoRepository,
                                 ClipRepository clipRepository,
                                 ClipScoreRepository clipScoreRepository,
-                                PythonRunner pythonRunner, ObjectMapper objectMapper) {
+                                PythonRunner pythonRunner, ObjectMapper objectMapper,
+                                com.viralclipper.service.FeedbackService feedbackService) {
         this.appConfig = appConfig;
         this.jobRepository = jobRepository;
         this.stageStatusRepository = stageStatusRepository;
@@ -48,6 +50,7 @@ public class PipelineOrchestrator {
         this.clipScoreRepository = clipScoreRepository;
         this.pythonRunner = pythonRunner;
         this.objectMapper = objectMapper;
+        this.feedbackService = feedbackService;
     }
 
     public void runPipeline(String jobId) {
@@ -223,11 +226,19 @@ public class PipelineOrchestrator {
 
     private String stageScore(Job job, Video video) throws Exception {
         String segmentsPath = appConfig.getDataDir() + "/segments/" + video.getId() + ".json";
+        String audioPath = appConfig.getDataDir() + "/audio/" + video.getId() + ".wav";
+        String transcriptPath = appConfig.getDataDir() + "/transcripts/" + video.getId() + ".json";
 
-        List<String> args = List.of(
+        List<String> args = new ArrayList<>(List.of(
                 "--segments", segmentsPath,
                 "--video", video.getFilePath()
-        );
+        ));
+        if (new File(audioPath).exists()) {
+            args.addAll(List.of("--audio", audioPath));
+        }
+        if (new File(transcriptPath).exists()) {
+            args.addAll(List.of("--transcript", transcriptPath));
+        }
 
         JsonNode result = pythonRunner.runScript("score.py", args);
 
@@ -251,6 +262,8 @@ public class PipelineOrchestrator {
             clip.setRankPos(rank++);
             clip.setScore(seg.path("finalScore").asDouble());
             clip.setTier(seg.path("tier").asText());
+            clip.setTitle(seg.path("title").asText(null));
+            clip.setDescription(seg.path("description").asText(null));
             clip.setStartTime(seg.path("startTime").asDouble());
             clip.setEndTime(seg.path("endTime").asDouble());
             clip.setDurationSec(seg.path("duration").asDouble());
@@ -267,6 +280,7 @@ public class PipelineOrchestrator {
             cs.setNovelty(scores.path("novelty").asDouble());
             cs.setClarity(scores.path("clarity").asDouble());
             cs.setEmotionalEnergy(scores.path("emotionalEnergy").asDouble());
+            cs.setTextSentiment(scores.path("textSentiment").asDouble());
             cs.setPauseStructure(scores.path("pauseStructure").asDouble());
             cs.setFacePresence(scores.path("facePresence").asDouble());
             cs.setSceneChange(scores.path("sceneChange").asDouble());
@@ -275,6 +289,8 @@ public class PipelineOrchestrator {
             cs.setBoostTotal(scores.path("boostTotal").asDouble());
             cs.setPenaltyTotal(scores.path("penaltyTotal").asDouble());
             clipScoreRepository.save(cs);
+
+            feedbackService.saveFeedbackSnapshot(clip, cs);
         }
     }
 

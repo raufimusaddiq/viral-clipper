@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "trained_on": 0,
+  "last_updated": "2026-04-19T00:00:00Z",
+  "weights": {
+    "hookStrength": 0.18,
+    "keywordTrigger": 0.09,
+    "novelty": 0.09,
+    "clarity": 0.10,
+    "emotionalEnergy": 0.09,
+    "textSentiment": 0.05,
+    "pauseStructure": 0.07,
+    "facePresence": 0.10,
+    "sceneChange": 0.08,
+    "topicFit": 0.08,
+    "historyScore": 0.07
+  },
+  "thresholds": {
+    "PRIMARY": 0.80,
+    "BACKUP": 0.65
+  }
+}

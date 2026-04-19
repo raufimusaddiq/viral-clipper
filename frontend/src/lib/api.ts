@@ -89,6 +89,21 @@ export class ApiClient {
     });
   }
 
+  async submitFeedback(clipId: string, metrics: { views: number; likes: number; comments: number; shares: number; saves: number }) {
+    return this.request(`/api/clips/${clipId}/feedback`, {
+      method: 'POST',
+      body: JSON.stringify(metrics),
+    });
+  }
+
+  async trainWeights() {
+    return this.request('/api/feedback/train', { method: 'POST' });
+  }
+
+  async getWeightsStatus() {
+    return this.request('/api/feedback/weights');
+  }
+
   getPreviewUrl(clipId: string) {
     return `${this.baseUrl}/api/clips/${clipId}/preview`;
   }

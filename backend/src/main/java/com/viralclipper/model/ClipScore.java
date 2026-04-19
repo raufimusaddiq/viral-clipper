@@ -17,6 +17,7 @@ public class ClipScore {
     private Double novelty;
     private Double clarity;
     private Double emotionalEnergy;
+    private Double textSentiment;
     private Double pauseStructure;
     private Double facePresence;
     private Double sceneChange;
@@ -45,6 +46,8 @@ public class ClipScore {
     public void setClarity(Double clarity) { this.clarity = clarity; }
     public Double getEmotionalEnergy() { return emotionalEnergy; }
     public void setEmotionalEnergy(Double emotionalEnergy) { this.emotionalEnergy = emotionalEnergy; }
+    public Double getTextSentiment() { return textSentiment; }
+    public void setTextSentiment(Double textSentiment) { this.textSentiment = textSentiment; }
     public Double getPauseStructure() { return pauseStructure; }
     public void setPauseStructure(Double pauseStructure) { this.pauseStructure = pauseStructure; }
     public Double getFacePresence() { return facePresence; }

@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS clip (
     rank_pos INTEGER,
     score REAL,
     tier TEXT NOT NULL,
+    title TEXT,
+    description TEXT,
     start_time REAL NOT NULL,
     end_time REAL NOT NULL,
     duration_sec REAL NOT NULL,
@@ -55,6 +57,7 @@ CREATE TABLE IF NOT EXISTS clip_score (
     novelty REAL,
     clarity REAL,
     emotional_energy REAL,
+    text_sentiment REAL,
     pause_structure REAL,
     face_presence REAL,
     scene_change REAL,
@@ -69,4 +72,24 @@ CREATE INDEX IF NOT EXISTS idx_job_status ON job(status);
 CREATE INDEX IF NOT EXISTS idx_clip_video ON clip(video_id);
 CREATE INDEX IF NOT EXISTS idx_clip_tier ON clip(tier);
 CREATE INDEX IF NOT EXISTS idx_clip_rank ON clip(rank_pos);
+CREATE TABLE IF NOT EXISTS clip_feedback (
+    id TEXT PRIMARY KEY,
+    clip_id TEXT NOT NULL,
+    video_id TEXT NOT NULL,
+    features TEXT NOT NULL,
+    predicted_score REAL NOT NULL,
+    predicted_tier TEXT NOT NULL,
+    tiktok_views INTEGER DEFAULT 0,
+    tiktok_likes INTEGER DEFAULT 0,
+    tiktok_comments INTEGER DEFAULT 0,
+    tiktok_shares INTEGER DEFAULT 0,
+    tiktok_saves INTEGER DEFAULT 0,
+    actual_viral_score REAL,
+    posted_at TEXT,
+    last_checked TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_stage_job ON stage_status(job_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_clip ON clip_feedback(clip_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_video ON clip_feedback(video_id);

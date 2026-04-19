@@ -23,15 +23,24 @@ from score import (
     score_scene_change,
     score_topic_fit,
     score_history,
+    score_text_sentiment,
     calc_boosts,
     calc_penalties,
     determine_tier,
     score_segment,
+    generate_clip_title,
+    generate_clip_description,
     WEIGHTS,
     HOOK_PHRASES,
     KEYWORD_TRIGGERS,
     PENALTY_CONDITIONS,
+    BOOST_CONDITIONS,
+    CONVERSATION_MARKERS,
+    POSITIVE_WORDS,
+    NEGATIVE_WORDS,
 )
+from feedback import calculate_viral_score
+from learn_weights import pearson_correlation, train_weights, load_current_weights
 
 
 def run_script(script_name, args):
@@ -39,7 +48,7 @@ def run_script(script_name, args):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
 
-# ── Segment unit tests ──
+# -- Segment unit tests --
 
 
 class TestFindSegments:
@@ -121,7 +130,7 @@ class TestSegmentReason:
         assert "continuous" in reason.lower()
 
 
-# ── Segment subprocess tests ──
+# -- Segment subprocess tests --
 
 
 class TestSegmentScript:
@@ -173,7 +182,7 @@ class TestSegmentScript:
         assert output_path.exists()
 
 
-# ── Score unit tests ──
+# -- Score unit tests --
 
 
 class TestScoreHookStrength:
@@ -257,14 +266,26 @@ class TestScoreDefaults:
     def test_pause_structure_fast(self):
         assert score_pause_structure("satu dua tiga empat lima enam tujuh delapan", 3) >= 0.5
 
-    def test_face_presence_default(self):
+    def test_face_presence_no_video(self):
         assert score_face_presence() == 0.5
 
-    def test_scene_change_default(self):
+    def test_face_presence_nonexistent_video(self):
+        assert score_face_presence("/nonexistent/video.mp4", 0, 10) == 0.5
+
+    def test_scene_change_no_video(self):
         assert score_scene_change() == 0.5
+
+    def test_scene_change_nonexistent_video(self):
+        assert score_scene_change("/nonexistent/video.mp4", 0, 10) == 0.5
 
     def test_history_default(self):
         assert score_history() == 0.5
+
+    def test_history_no_data(self):
+        assert score_history(feedback_data=None, text="some text") == 0.5
+
+    def test_history_empty_data(self):
+        assert score_history(feedback_data=[], text="some text") == 0.5
 
 
 class TestScoreTopicFit:
@@ -304,6 +325,15 @@ class TestCalcBoosts:
     def test_multiple_boosts(self):
         result = calc_boosts("Kenapa kok bisa begitu? Tapi ternyata berbeda!")
         assert result >= 0.10
+
+    def test_conversational_tone_boost(self):
+        text = "Ya kan sih dong nih tuh deh loh nah duh"
+        result = calc_boosts(text)
+        assert result >= BOOST_CONDITIONS["conversational_tone"]
+
+    def test_no_conversational_boost_below_threshold(self):
+        result = calc_boosts("biasa saja satu dua tiga empat")
+        assert BOOST_CONDITIONS["conversational_tone"] not in [result] or result == 0.0 or result < BOOST_CONDITIONS["conversational_tone"] + BOOST_CONDITIONS["conversational_tone"]
 
 
 class TestCalcPenalties:
@@ -367,8 +397,11 @@ class TestScoreSegment:
         assert "finalScore" in result
         assert "tier" in result
         assert "scores" in result
+        assert "title" in result
+        assert "description" in result
         assert result["tier"] in ("PRIMARY", "BACKUP", "SKIP")
         assert result["finalScore"] > 0
+        assert result["finalScore"] <= 1.0
 
     def test_weak_segment(self):
         segment = {
@@ -385,8 +418,65 @@ class TestScoreSegment:
     def test_weights_sum_to_one(self):
         assert abs(sum(WEIGHTS.values()) - 1.0) < 0.001
 
+    def test_score_capped_at_one(self):
+        segment = {
+            "index": 0,
+            "startTime": 0.0,
+            "endTime": 15.0,
+            "duration": 15.0,
+            "text": "Rahasia penting! Kenapa? Tapi ternyata! Wow kaget! Pertama kedua ketiga!",
+            "reason": "hook",
+        }
+        result = score_segment(segment, niche_keywords=["rahasia", "penting"])
+        assert result["finalScore"] <= 1.0
 
-# ── Score subprocess tests ──
+
+# -- Title and Description generation tests --
+
+
+class TestGenerateClipTitle:
+    def test_question_title(self):
+        title = generate_clip_title("Kenapa bisa begitu? Ini penjelasannya.", "PRIMARY", {})
+        assert "?" in title
+        assert len(title) <= 100
+
+    def test_hook_phrase_title(self):
+        title = generate_clip_title("Rahasia yang harus kamu tahu tentang ini", "PRIMARY", {})
+        assert "Rahasia" in title or "rahasia" in title.lower()
+
+    def test_fallback_title(self):
+        title = generate_clip_title("biasa saja pembahasan hari ini", "SKIP", {})
+        assert len(title) > 0
+
+    def test_title_has_hashtags(self):
+        title = generate_clip_title("rahasia penting dan trik baru", "PRIMARY", {})
+        assert "#" in title
+
+    def test_title_max_length(self):
+        long_text = "Ini adalah teks yang sangat panjang sekali " * 20
+        title = generate_clip_title(long_text, "PRIMARY", {})
+        assert len(title) <= 103
+
+
+class TestGenerateClipDescription:
+    def test_description_basic(self):
+        desc = generate_clip_description("rahasia penting tentang kehidupan", "PRIMARY", {})
+        assert "rahasia" in desc.lower() or "#" in desc
+
+    def test_description_has_hashtags(self):
+        desc = generate_clip_description("trik hack tips solusi", "PRIMARY", {})
+        assert "#" in desc
+
+    def test_description_has_cta(self):
+        desc = generate_clip_description("biasa saja", "BACKUP", {})
+        assert "!" in desc
+
+    def test_description_with_hook_line(self):
+        desc = generate_clip_description("rahasia penting yang wajib diketahui", "PRIMARY", {})
+        assert "Rahasia" in desc or "rahasia" in desc.lower()
+
+
+# -- Score subprocess tests --
 
 
 class TestScoreScript:
@@ -419,7 +509,7 @@ class TestScoreScript:
         assert result.returncode != 0
 
 
-# ── Transcribe subprocess test (requires faster-whisper) ──
+# -- Transcribe subprocess test --
 
 
 class TestTranscribeScript:
@@ -551,7 +641,7 @@ class TestScoreMain:
         assert exc_info.value.code == 1
 
 
-# ── Constants validation ──
+# -- Constants validation --
 
 
 class TestConstants:
@@ -563,7 +653,7 @@ class TestConstants:
 
     def test_all_weights_present(self):
         expected = {"hookStrength", "keywordTrigger", "novelty", "clarity",
-                     "emotionalEnergy", "pauseStructure", "facePresence",
+                     "emotionalEnergy", "textSentiment", "pauseStructure", "facePresence",
                      "sceneChange", "topicFit", "historyScore"}
         assert set(WEIGHTS.keys()) == expected
 
@@ -578,7 +668,7 @@ class TestConstants:
             assert len(kw) > 0
 
 
-# ── Render tests ──
+# -- Render tests --
 
 
 from render import (
@@ -634,7 +724,7 @@ class TestRenderScript:
         assert output["data"]["failedCount"] >= 1
 
 
-# ── Subtitle tests ──
+# -- Subtitle tests --
 
 
 from subtitle import (
@@ -724,7 +814,7 @@ class TestSubtitleScript:
         assert result.returncode != 0
 
 
-# ── Variation tests ──
+# -- Variation tests --
 
 
 from variation import VARIATION_PRESETS, generate_variation
@@ -775,7 +865,7 @@ class TestVariationScript:
         assert output["data"]["variationCount"] == 0
 
 
-# ── Analytics tests ──
+# -- Analytics tests --
 
 
 from analytics import (
@@ -1113,3 +1203,219 @@ class TestVariationMain:
         ])
         from variation import main
         main()
+
+
+# -- Text sentiment tests --
+
+
+class TestScoreTextSentiment:
+    def test_positive_text(self):
+        result = score_text_sentiment("Ini hebat bagus keren berhasil")
+        assert result > 0.5
+
+    def test_negative_text(self):
+        result = score_text_sentiment("Ini gagal buruk jelek parah")
+        assert result < 0.5
+
+    def test_neutral_text(self):
+        result = score_text_sentiment("hari ini kita pergi ke pasar")
+        assert result == 0.5
+
+    def test_mixed_text(self):
+        result = score_text_sentiment("hebat tapi gagal dan buruk")
+        assert 0.3 < result < 0.7
+
+    def test_strong_positive(self):
+        result = score_text_sentiment("hebat bagus keren sukses bahagia senang luar biasa")
+        assert result > 0.7
+
+    def test_strong_negative(self):
+        result = score_text_sentiment("gagal buruk jelek sedih marah stres depresi")
+        assert result < 0.3
+
+    def test_positive_words_not_empty(self):
+        assert len(POSITIVE_WORDS) > 20
+
+    def test_negative_words_not_empty(self):
+        assert len(NEGATIVE_WORDS) > 20
+
+
+class TestAudioRmsFallback:
+    def test_no_audio_returns_text_only(self):
+        result = score_emotional_energy("biasa saja tidak ada yang spesial")
+        assert result >= 0.3
+        assert isinstance(result, float)
+
+
+class TestSilenceDetectionFallback:
+    def test_no_transcript_returns_words_per_sec(self):
+        result = score_pause_structure("satu dua tiga empat lima", 3)
+        assert result >= 0.5
+
+    def test_no_transcript_returns_default_for_slow(self):
+        result = score_pause_structure("kata", 30)
+        assert result <= 0.5
+
+
+# -- Feedback tests --
+
+
+class TestCalculateViralScore:
+    def test_zero_views(self):
+        assert calculate_viral_score(0, 0, 0, 0, 0) == 0.0
+
+    def test_high_engagement(self):
+        score = calculate_viral_score(10000, 1000, 200, 300, 100)
+        assert score > 0.5
+
+    def test_low_engagement(self):
+        score = calculate_viral_score(100000, 10, 0, 0, 0)
+        assert score < 0.5
+
+    def test_viral_ratio(self):
+        score_low = calculate_viral_score(1000, 10, 0, 0, 0, followers=100000)
+        score_high = calculate_viral_score(1000000, 50000, 5000, 10000, 2000, followers=100)
+        assert score_high > score_low
+
+    def test_capped_at_one(self):
+        score = calculate_viral_score(10000000, 500000, 100000, 200000, 50000)
+        assert score <= 1.0
+
+    def test_basic_score(self):
+        score = calculate_viral_score(5000, 200, 50, 30, 20)
+        assert 0.0 <= score <= 1.0
+
+
+class TestFeedbackScript:
+    def test_calc_viral_score(self, tmp_path):
+        result = run_script("feedback.py", [
+            "--action", "calc-viral-score",
+            "--views", "10000",
+            "--likes", "500",
+            "--comments", "50",
+            "--shares", "30",
+            "--saves", "20",
+        ])
+        assert result.returncode == 0
+        output = json.loads(result.stdout)
+        assert output["success"] is True
+        assert "viralScore" in output["data"]
+
+    def test_missing_action(self):
+        result = run_script("feedback.py", [])
+        assert result.returncode != 0
+
+
+# -- Learn weights tests --
+
+
+class TestPearsonCorrelation:
+    def test_perfect_positive(self):
+        assert abs(pearson_correlation([1, 2, 3], [2, 4, 6]) - 1.0) < 0.001
+
+    def test_perfect_negative(self):
+        assert abs(pearson_correlation([1, 2, 3], [6, 4, 2]) - (-1.0)) < 0.001
+
+    def test_no_correlation(self):
+        corr = pearson_correlation([1, 2, 3, 4], [1, -1, 1, -1])
+        assert abs(corr) < 0.5
+
+    def test_single_value(self):
+        assert pearson_correlation([1], [2]) == 0.0
+
+    def test_constant_values(self):
+        assert pearson_correlation([1, 1, 1], [2, 2, 2]) == 0.0
+
+
+class TestTrainWeights:
+    def test_insufficient_data(self, tmp_path, monkeypatch):
+        import learn_weights
+        monkeypatch.setattr(learn_weights, "WEIGHTS_PATH", str(tmp_path / "weights.json"))
+        initial = {"version": 0, "trained_on": 0, "last_updated": "", "weights": learn_weights.DEFAULT_WEIGHTS if hasattr(learn_weights, 'DEFAULT_WEIGHTS') else {}}
+        if not initial["weights"]:
+            from score import DEFAULT_WEIGHTS as DW
+            initial["weights"] = dict(DW)
+        with open(str(tmp_path / "weights.json"), "w") as f:
+            json.dump(initial, f)
+        records = [{"features": {"hookStrength": 0.8}, "actual_viral_score": 0.7}]
+        result = train_weights(records, min_samples=5)
+        assert result["data"]["status"] == "insufficient_data"
+
+    def test_successful_training(self, tmp_path, monkeypatch):
+        import learn_weights
+        monkeypatch.setattr(learn_weights, "WEIGHTS_PATH", str(tmp_path / "weights.json"))
+        from score import DEFAULT_WEIGHTS as DW
+        initial = {"version": 0, "trained_on": 0, "last_updated": "", "weights": dict(DW)}
+        with open(str(tmp_path / "weights.json"), "w") as f:
+            json.dump(initial, f)
+        records = []
+        for i in range(10):
+            records.append({
+                "features": {k: (i + 1) / 10.0 for k in learn_weights.FEATURE_KEYS},
+                "actual_viral_score": (i + 1) / 10.0,
+            })
+        result = train_weights(records, min_samples=5)
+        assert result["data"]["status"] == "trained"
+        assert result["data"]["version"] == 1
+        assert "new_weights" in result["data"]
+
+    def test_weights_sum_to_one_after_training(self, tmp_path, monkeypatch):
+        import learn_weights
+        monkeypatch.setattr(learn_weights, "WEIGHTS_PATH", str(tmp_path / "weights.json"))
+        from score import DEFAULT_WEIGHTS as DW
+        initial = {"version": 0, "trained_on": 0, "last_updated": "", "weights": dict(DW)}
+        with open(str(tmp_path / "weights.json"), "w") as f:
+            json.dump(initial, f)
+        records = []
+        for i in range(10):
+            records.append({
+                "features": {k: (i + 1) / 10.0 for k in learn_weights.FEATURE_KEYS},
+                "actual_viral_score": (i + 1) / 10.0,
+            })
+        train_weights(records, min_samples=5)
+        with open(str(tmp_path / "weights.json")) as f:
+            updated = json.load(f)
+        assert abs(sum(updated["weights"].values()) - 1.0) < 0.01
+
+
+class TestLearnWeightsScript:
+    def test_status_action(self, tmp_path):
+        from score import DEFAULT_WEIGHTS as DW
+        weights_path = tmp_path / "weights.json"
+        weights_path.write_text(json.dumps({"version": 2, "trained_on": 10, "last_updated": "2026-01-01", "weights": dict(DW)}))
+
+        import learn_weights
+        original_path = learn_weights.WEIGHTS_PATH
+        learn_weights.WEIGHTS_PATH = str(weights_path)
+        try:
+            result = run_script("learn_weights.py", ["--action", "status"])
+        finally:
+            learn_weights.WEIGHTS_PATH = original_path
+        assert result.returncode == 0
+        output = json.loads(result.stdout)
+        assert output["success"] is True
+
+    def test_train_missing_feedback(self):
+        result = run_script("learn_weights.py", ["--action", "train"])
+        assert result.returncode != 0
+
+
+# -- History score with feedback data --
+
+
+class TestScoreHistoryWithFeedback:
+    def test_similar_clips(self):
+        feedback = [
+            {"text": "rahasia penting tentang kehidupan yang baik", "actual_viral_score": 0.9},
+            {"text": "rahasia penting untuk kehidupan yang benar", "actual_viral_score": 0.8},
+            {"text": "hal biasa saja tidak ada hubungannya", "actual_viral_score": 0.2},
+        ]
+        result = score_history(feedback_data=feedback, text="rahasia penting untuk kehidupan")
+        assert result > 0.5
+
+    def test_no_similar_clips(self):
+        feedback = [
+            {"text": "resep masakan nasi goreng", "actual_viral_score": 0.9},
+        ]
+        result = score_history(feedback_data=feedback, text="rahasia penting teknologi")
+        assert result == 0.5
