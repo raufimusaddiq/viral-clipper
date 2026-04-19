@@ -60,6 +60,35 @@ export class ApiClient {
     return this.request('/api/videos');
   }
 
+  async deleteVideo(videoId: string) {
+    return this.request(`/api/videos/${videoId}`, { method: 'DELETE' });
+  }
+
+  async cancelJob(jobId: string) {
+    return this.request(`/api/jobs/${jobId}/cancel`, { method: 'POST' });
+  }
+
+  async discoverSearch(query: string, maxResults = 20, minDuration = 0, maxDuration = 0) {
+    return this.request('/api/discover/search', {
+      method: 'POST',
+      body: JSON.stringify({ query, maxResults, minDuration, maxDuration }),
+    });
+  }
+
+  async discoverTrending(maxResults = 20, region = 'ID') {
+    return this.request('/api/discover/trending', {
+      method: 'POST',
+      body: JSON.stringify({ maxResults, region }),
+    });
+  }
+
+  async discoverChannel(channelUrl: string, maxResults = 20, minDuration = 0, maxDuration = 0) {
+    return this.request('/api/discover/channel', {
+      method: 'POST',
+      body: JSON.stringify({ channelUrl, maxResults, minDuration, maxDuration }),
+    });
+  }
+
   getPreviewUrl(clipId: string) {
     return `${this.baseUrl}/api/clips/${clipId}/preview`;
   }

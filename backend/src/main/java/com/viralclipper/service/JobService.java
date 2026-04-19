@@ -33,6 +33,8 @@ public class JobService {
         this.pipelineOrchestrator = pipelineOrchestrator;
     }
 
+    private final Map<String, Thread> activeThreads = new java.util.concurrent.ConcurrentHashMap<>();
+
     public Job createAndStartJob(String videoId) {
         Video video = videoRepository.findById(videoId)
                 .orElseThrow(() -> new RuntimeException("Video not found: " + videoId));
@@ -53,8 +55,15 @@ public class JobService {
             stageStatusRepository.save(ss);
         }
 
-        Thread pipelineThread = new Thread(() -> pipelineOrchestrator.runPipeline(jobId), "pipeline-" + jobId);
+        Thread pipelineThread = new Thread(() -> {
+            try {
+                pipelineOrchestrator.runPipeline(jobId);
+            } finally {
+                activeThreads.remove(jobId);
+            }
+        }, "pipeline-" + jobId);
         pipelineThread.setDaemon(true);
+        activeThreads.put(jobId, pipelineThread);
         pipelineThread.start();
 
         return job;
@@ -81,9 +90,33 @@ public class JobService {
         job.setErrorMessage(null);
         jobRepository.save(job);
 
-        Thread pipelineThread = new Thread(() -> pipelineOrchestrator.runPipeline(jobId), "pipeline-retry-" + jobId);
+        Thread pipelineThread = new Thread(() -> {
+            try {
+                pipelineOrchestrator.runPipeline(jobId);
+            } finally {
+                activeThreads.remove(jobId);
+            }
+        }, "pipeline-retry-" + jobId);
         pipelineThread.setDaemon(true);
+        activeThreads.put(jobId, pipelineThread);
         pipelineThread.start();
+
+        return job;
+    }
+
+    public Job cancelJob(String jobId) {
+        Job job = jobRepository.findById(jobId).orElseThrow(() -> new RuntimeException("Job not found: " + jobId));
+        if (!"RUNNING".equals(job.getStatus()) && !"QUEUED".equals(job.getStatus())) {
+            throw new RuntimeException("Can only cancel running or queued jobs, current: " + job.getStatus());
+        }
+        job.setStatus("CANCELLED");
+        job.setErrorMessage("Cancelled by user");
+        jobRepository.save(job);
+
+        Thread t = activeThreads.remove(jobId);
+        if (t != null) {
+            t.interrupt();
+        }
 
         return job;
     }

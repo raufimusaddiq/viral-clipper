@@ -129,6 +129,16 @@ if (-not $BackendOnly) {
 }
 
 Write-Host ""
+Write-Host "=== Pruning old images ===" -ForegroundColor Yellow
+docker image prune -f 2>$null | Out-Null
+foreach ($svc in @("viralvideo-backend", "viralvideo-frontend")) {
+    $ids = docker images --format "{{.ID}}" --filter "dangling=true" --filter "reference=${svc}" 2>$null
+    if ($ids) { $ids | ForEach-Object { docker rmi $_ 2>$null | Out-Null } }
+}
+$reclaimed = docker system df --format "{{.Reclaimable}}" 2>$null
+Write-Host "       Done." -ForegroundColor Green
+
+Write-Host ""
 Write-Host "=== Services Running ===" -ForegroundColor Green
 if (-not $FrontendOnly) { Write-Host "  Backend:  http://localhost:8080" -ForegroundColor Cyan }
 if (-not $BackendOnly)  { Write-Host "  Frontend: http://localhost:3000" -ForegroundColor Cyan }
