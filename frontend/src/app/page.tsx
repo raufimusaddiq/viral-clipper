@@ -110,6 +110,8 @@ const STATUS_COLORS: Record<string, string> = {
   RUNNING: 'bg-blue-400 animate-pulse',
   PENDING: 'bg-zinc-500',
   IN_PROGRESS: 'bg-blue-400 animate-pulse',
+  QUEUED: 'bg-yellow-400',
+  CANCELLED: 'bg-orange-400',
 };
 
 function formatTime(seconds: number): string {
@@ -330,10 +332,180 @@ function ClipCard({
   );
 }
 
+type DiscoveredVideo = {
+  videoId: string;
+  title: string;
+  url: string;
+  duration: number;
+  channel: string;
+  viewCount: number | null;
+  uploadDate: string;
+  relevanceScore: number;
+};
+
+type DiscoveryMode = 'search' | 'trending' | 'channel';
+type MainTab = 'import' | 'discovery';
 type TabKey = 'clips' | 'transcript';
+
+function formatDurationSec(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function DiscoveryPanel({ api, onImport }: { api: ApiClient; onImport: (url: string) => Promise<void> }) {
+  const [mode, setMode] = useState<DiscoveryMode>('search');
+  const [query, setQuery] = useState('');
+  const [channelUrl, setChannelUrl] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [results, setResults] = useState<DiscoveredVideo[]>([]);
+  const [importingIds, setImportingIds] = useState<Set<string>>(new Set());
+
+  const handleSearch = async () => {
+    if (mode === 'search' && !query.trim()) return;
+    if (mode === 'channel' && !channelUrl.trim()) return;
+    setLoading(true);
+    setError(null);
+    setResults([]);
+    try {
+      let data;
+      if (mode === 'search') {
+        data = await api.discoverSearch(query.trim()) as { videos: DiscoveredVideo[] };
+      } else if (mode === 'trending') {
+        data = await api.discoverTrending() as { videos: DiscoveredVideo[] };
+      } else {
+        data = await api.discoverChannel(channelUrl.trim()) as { videos: DiscoveredVideo[] };
+      }
+      setResults(data.videos || []);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Discovery failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleImportOne = async (video: DiscoveredVideo) => {
+    setImportingIds(prev => new Set([...prev, video.videoId]));
+    try {
+      await onImport(video.url);
+    } catch {}
+    setImportingIds(prev => { const n = new Set(prev); n.delete(video.videoId); return n; });
+  };
+
+  const handleImportTopN = async (n: number) => {
+    const top = results.filter(v => v.relevanceScore >= 0.6).slice(0, n);
+    for (const v of top) {
+      setImportingIds(prev => new Set([...prev, v.videoId]));
+      try { await onImport(v.url); } catch {}
+      setImportingIds(prev => { const next = new Set(prev); next.delete(v.videoId); return next; });
+    }
+  };
+
+  const highRelevance = results.filter(v => v.relevanceScore >= 0.6).length;
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-zinc-900 rounded-lg p-6">
+        <div className="flex gap-2 mb-4">
+          {(['search', 'trending', 'channel'] as DiscoveryMode[]).map(m => (
+            <button key={m} onClick={() => setMode(m)} className={`px-4 py-2 rounded text-sm font-medium transition-colors ${
+              mode === m ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+            }`}>{m.charAt(0).toUpperCase() + m.slice(1)}</button>
+          ))}
+        </div>
+
+        <div className="flex gap-3">
+          {mode === 'search' && (
+            <input type="text" value={query} onChange={e => setQuery(e.target.value)}
+              placeholder="Search keywords (e.g. rahasia penting indonesia)..."
+              onKeyDown={e => e.key === 'Enter' && handleSearch()}
+              className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500" />
+          )}
+          {mode === 'channel' && (
+            <input type="text" value={channelUrl} onChange={e => setChannelUrl(e.target.value)}
+              placeholder="YouTube channel URL (e.g. https://youtube.com/@channel)"
+              onKeyDown={e => e.key === 'Enter' && handleSearch()}
+              className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500" />
+          )}
+          {mode === 'trending' && (
+            <div className="flex-1 text-sm text-zinc-400 py-2">Fetches current Indonesian trending videos</div>
+          )}
+          <button onClick={handleSearch} disabled={loading}
+            className="px-6 bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-700 disabled:text-zinc-500 text-white rounded py-2 text-sm font-medium transition-colors whitespace-nowrap">
+            {loading ? 'Searching...' : 'Discover'}
+          </button>
+        </div>
+        {error && <p className="text-red-400 text-xs mt-2">{error}</p>}
+      </div>
+
+      {results.length > 0 && (
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-zinc-400">{results.length} videos found</span>
+          {highRelevance > 0 && (
+            <>
+              <span className="text-green-400 text-sm">{highRelevance} high relevance</span>
+              <button onClick={() => handleImportTopN(5)} disabled={loading}
+                className="px-4 py-1.5 rounded text-xs font-medium bg-green-700 text-white hover:bg-green-600 disabled:bg-zinc-700 transition-colors">
+                Import Top 5
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {loading && results.length === 0 && (
+        <div className="text-center py-8 text-zinc-500">
+          <div className="animate-spin inline-block w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full mb-2" />
+          <p>Discovering videos...</p>
+        </div>
+      )}
+
+      {!loading && results.length === 0 && error === null && (
+        <div className="text-center py-8 text-zinc-500">
+          <p>Use the search box above to discover viral-worthy Indonesian videos.</p>
+        </div>
+      )}
+
+      {results.length > 0 && (
+        <div className="space-y-2">
+          {results.map(video => {
+            const isImporting = importingIds.has(video.videoId);
+            const scoreColor = video.relevanceScore >= 0.6 ? 'text-green-400' : video.relevanceScore >= 0.3 ? 'text-yellow-400' : 'text-zinc-500';
+            const scoreBg = video.relevanceScore >= 0.6 ? 'bg-green-600/20 border-green-600/40' : video.relevanceScore >= 0.3 ? 'bg-yellow-600/20 border-yellow-600/40' : 'bg-zinc-800 border-zinc-700';
+            return (
+              <div key={video.videoId} className={`rounded-lg p-4 border flex items-start gap-4 ${scoreBg}`}>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium text-zinc-200 truncate">{video.title || video.videoId}</p>
+                  <div className="flex items-center gap-3 mt-1 text-xs text-zinc-400">
+                    {video.channel && <span>{video.channel}</span>}
+                    {video.duration > 0 && (
+                      <>{video.duration > 0 && <span>{formatDurationSec(video.duration)}</span>}</>
+                    )}
+                    {video.viewCount !== null && video.viewCount > 0 && (
+                      <span>{(video.viewCount / 1000).toFixed(1)}K views</span>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 flex-shrink-0">
+                  <span className={`text-sm font-bold ${scoreColor}`}>{(video.relevanceScore * 100).toFixed(0)}%</span>
+                  <button onClick={() => handleImportOne(video)} disabled={isImporting}
+                    className="px-3 py-1.5 rounded text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:bg-zinc-700 disabled:text-zinc-500 transition-colors">
+                    {isImporting ? '...' : 'Import'}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function Home() {
   const api = useMemo(() => new ApiClient(), []);
+  const [mainTab, setMainTab] = useState<MainTab>('import');
   const [youtubeUrl, setYoutubeUrl] = useState('');
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
@@ -526,6 +698,16 @@ export default function Home() {
       <h1 className="text-3xl font-bold mb-2">Viral Clipper</h1>
       <p className="text-zinc-400 mb-8">AI-powered video clip maker for Indonesian TikTok content</p>
 
+      <div className="flex gap-2 mb-6">
+        <button onClick={() => setMainTab('import')} className={`px-6 py-2.5 rounded text-sm font-medium transition-colors ${
+          mainTab === 'import' ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+        }`}>Import & Clips</button>
+        <button onClick={() => setMainTab('discovery')} className={`px-6 py-2.5 rounded text-sm font-medium transition-colors ${
+          mainTab === 'discovery' ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+        }`}>Discover</button>
+      </div>
+
+      {mainTab === 'import' && (
       <section className="bg-zinc-900 rounded-lg p-6 mb-8">
         <h2 className="text-xl font-semibold mb-4">Import Video</h2>
         <form onSubmit={handleImport} className="flex gap-3">
@@ -546,22 +728,23 @@ export default function Home() {
           </button>
         </form>
         {importError && <p className="text-red-400 text-xs mt-2">{importError}</p>}
-      </section>
+       </section>
+      )}
 
-      {initialLoad && (
+      {mainTab === 'import' && initialLoad && (
         <div className="text-center py-12 text-zinc-500">
           <div className="animate-spin inline-block w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full mb-2" />
           <p>Loading...</p>
         </div>
       )}
 
-      {!initialLoad && videoGroups.length === 0 && (
+      {mainTab === 'import' && !initialLoad && videoGroups.length === 0 && (
         <div className="text-center py-12 text-zinc-500">
           <p>No videos yet. Import a YouTube URL above to get started.</p>
         </div>
       )}
 
-      {!initialLoad && videoGroups.length > 0 && (
+      {mainTab === 'import' && !initialLoad && videoGroups.length > 0 && (
         <section>
           <h2 className="text-xl font-semibold mb-4">Videos ({videoGroups.length})</h2>
           <div className="space-y-4">
@@ -616,6 +799,24 @@ export default function Home() {
                       </div>
                     </div>
                     <span className="text-xs text-zinc-500">{isExpanded ? 'Collapse' : 'Expand'}</span>
+                    {group.job && (group.job.status === 'RUNNING' || group.job.status === 'QUEUED') && (
+                      <button onClick={async (e) => {
+                        e.stopPropagation();
+                        try { await api.cancelJob(group.job!.id); await loadAllData(); } catch {}
+                      }} className="ml-2 px-3 py-1 rounded text-xs font-medium bg-orange-600 text-white hover:bg-orange-500 transition-colors">
+                        Cancel
+                      </button>
+                    )}
+                    {(!group.job || group.job.status === 'FAILED' || group.job.status === 'CANCELLED' || group.job.status === 'COMPLETED') && (
+                      <button onClick={async (e) => {
+                        e.stopPropagation();
+                        if (confirm('Delete this video and all its clips?')) {
+                          try { await api.deleteVideo(group.video.id); await loadAllData(); } catch {}
+                        }
+                      }} className="ml-2 px-3 py-1 rounded text-xs font-medium bg-red-700 text-white hover:bg-red-600 transition-colors">
+                        Delete
+                      </button>
+                    )}
                   </button>
 
                   {isExpanded && (
@@ -721,7 +922,18 @@ export default function Home() {
               );
             })}
           </div>
-        </section>
+           </section>
+      )}
+
+      {mainTab === 'discovery' && (
+        <DiscoveryPanel api={api} onImport={async (url) => {
+          const importData = await api.importVideo(url) as { videoId: string };
+          const processData = await api.startProcessing(importData.videoId) as { jobId: string };
+          setCurrentJobId(processData.jobId);
+          startPolling(processData.jobId);
+          setMainTab('import');
+          await loadAllData();
+        }} />
       )}
 
       {previewingClip && (

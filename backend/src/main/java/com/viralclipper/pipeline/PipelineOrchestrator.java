@@ -83,6 +83,11 @@ public class PipelineOrchestrator {
     }
 
     private void runStage(Job job, String stageName, StageRunnable runnable) {
+        Job fresh = jobRepository.findById(job.getId()).orElse(job);
+        if ("CANCELLED".equals(fresh.getStatus())) {
+            throw new RuntimeException("Job cancelled by user");
+        }
+
         StageStatus stage = stageStatusRepository
                 .findByJobId(job.getId()).stream()
                 .filter(s -> s.getStage().equals(stageName))

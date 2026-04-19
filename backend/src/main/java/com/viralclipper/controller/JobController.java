@@ -68,4 +68,17 @@ public class JobController {
             return ResponseEntity.badRequest().body(Map.of("status", "error", "error", e.getMessage()));
         }
     }
+
+    @PostMapping("/jobs/{jobId}/cancel")
+    public ResponseEntity<Map<String, Object>> cancelJob(@PathVariable String jobId) {
+        try {
+            Job job = jobService.cancelJob(jobId);
+            return ResponseEntity.ok(Map.of("status", "ok", "data", Map.of(
+                    "jobId", job.getId(),
+                    "status", job.getStatus()
+            )));
+        } catch (RuntimeException e) {
+            return ResponseEntity.badRequest().body(Map.of("status", "error", "error", e.getMessage()));
+        }
+    }
 }
