@@ -164,7 +164,7 @@ def _extract_first_sentence(text):
     return text
 
 
-def _extract_audio_rms_ratio(audio_path, start_time, end_time):
+def _load_audio_cache(audio_path):
     if not audio_path or not os.path.exists(audio_path):
         return None
     try:
@@ -182,15 +182,30 @@ def _extract_audio_rms_ratio(audio_path, start_time, end_time):
             if n_channels > 1:
                 samples = samples[::n_channels]
             total_rms = np.sqrt(np.mean(samples ** 2))
-            if total_rms == 0:
-                return None
-            start_sample = max(0, min(int(start_time * framerate), len(samples)))
-            end_sample = max(0, min(int(end_time * framerate), len(samples)))
-            if start_sample >= end_sample:
-                return None
-            seg = samples[start_sample:end_sample]
-            seg_rms = np.sqrt(np.mean(seg ** 2))
-            return seg_rms / total_rms
+            return {"samples": samples, "framerate": framerate, "total_rms": total_rms}
+    except Exception:
+        return None
+
+
+def _extract_audio_rms_ratio(audio_path, start_time, end_time, audio_cache=None):
+    try:
+        import numpy as np
+        if audio_cache is None:
+            audio_cache = _load_audio_cache(audio_path)
+        if audio_cache is None:
+            return None
+        samples = audio_cache["samples"]
+        framerate = audio_cache["framerate"]
+        total_rms = audio_cache["total_rms"]
+        if total_rms == 0:
+            return None
+        start_sample = max(0, min(int(start_time * framerate), len(samples)))
+        end_sample = max(0, min(int(end_time * framerate), len(samples)))
+        if start_sample >= end_sample:
+            return None
+        seg = samples[start_sample:end_sample]
+        seg_rms = np.sqrt(np.mean(seg ** 2))
+        return seg_rms / total_rms
     except Exception:
         return None
 
@@ -294,7 +309,7 @@ def score_clarity(duration, text):
     return base
 
 
-def score_emotional_energy(text, audio_path=None, start_time=0.0, end_time=0.0):
+def score_emotional_energy(text, audio_path=None, start_time=0.0, end_time=0.0, audio_cache=None):
     text_score = 0.3
     lower = text.lower()
     count = sum(1 for w in EMOTION_WORDS if w in lower)
@@ -314,7 +329,7 @@ def score_emotional_energy(text, audio_path=None, start_time=0.0, end_time=0.0):
         text_score += 0.1
     text_score = min(text_score, 1.0)
 
-    rms_ratio = _extract_audio_rms_ratio(audio_path, start_time, end_time)
+    rms_ratio = _extract_audio_rms_ratio(audio_path, start_time, end_time, audio_cache=audio_cache)
     if rms_ratio is not None:
         if rms_ratio > 1.8:
             audio_score = 1.0
@@ -353,6 +368,204 @@ def score_pause_structure(text, duration, transcript_path=None, start_time=0.0, 
     if words_per_sec < 1.5:
         return 0.4
     return 0.5
+
+
+def _extract_frames_ffmpeg(video_path, timestamps):
+    import subprocess
+    import tempfile
+    frames = {}
+    tmpdir = tempfile.mkdtemp(prefix="vc_frames_")
+    try:
+        ts_list = sorted(set(timestamps))
+        if not ts_list:
+            return frames
+        start = max(0, ts_list[0] - 0.5)
+        end = ts_list[-1] + 0.5
+        out_pattern = os.path.join(tmpdir, "f_%06d.jpg")
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
+            "-i", video_path,
+            "-vf", "fps=1,scale=320:-2",
+            "-q:v", "5",
+            out_pattern
+        ]
+        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        if result.returncode == 0:
+            import cv2
+            import glob as _glob
+            extracted = sorted(_glob.glob(os.path.join(tmpdir, "f_*.jpg")))
+            for img_path in extracted:
+                img = cv2.imread(img_path)
+                if img is not None:
+                    frame_num = int(os.path.basename(img_path).replace("f_", "").replace(".jpg", ""))
+                    t = start + (frame_num - 1)
+                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+                    frames[t] = {"gray": gray, "hsv": hsv}
+                try:
+                    os.remove(img_path)
+                except Exception:
+                    pass
+        else:
+            for t in ts_list:
+                out_path = os.path.join(tmpdir, f"s_{int(t * 1000)}.jpg")
+                cmd2 = [
+                    "ffmpeg", "-y", "-ss", f"{t:.3f}", "-i", video_path,
+                    "-vframes", "1", "-q:v", "5", "-vf", "scale=320:-2",
+                    out_path
+                ]
+                r = subprocess.run(cmd2, capture_output=True, timeout=15)
+                if r.returncode == 0 and os.path.exists(out_path):
+                    import cv2
+                    img = cv2.imread(out_path)
+                    if img is not None:
+                        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+                        frames[t] = {"gray": gray, "hsv": hsv}
+                    try:
+                        os.remove(out_path)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    finally:
+        try:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+    return frames
+
+
+def _batch_analyze_video(video_path, segments):
+    if not video_path or not os.path.exists(video_path):
+        return {i: {"faces": 0.5, "scene": 0.5} for i in range(len(segments))}
+    try:
+        import cv2
+        import numpy as np
+
+        face_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+        smile_path = os.path.join(cv2.data.haarcascades, "haarcascade_smile.xml")
+        smile_cascade = None
+        if os.path.exists(smile_path):
+            smile_cascade = cv2.CascadeClassifier(smile_path)
+
+        all_times = []
+        unique_ts = set()
+        for i, seg in enumerate(segments):
+            start = seg.get("startTime", 0)
+            dur = seg.get("duration", 30)
+            end = seg.get("endTime", start + dur)
+            mid = start + dur * 0.5
+            ts = [mid, start, end]
+            all_times.append({"idx": i, "face_times": [mid], "scene_times": [start, mid, end]})
+            for t in ts:
+                unique_ts.add(round(t, 1))
+
+        unique_ts = sorted(unique_ts)
+        if len(unique_ts) > 60:
+            step = len(unique_ts) / 60
+            unique_ts = [unique_ts[int(i * step)] for i in range(60)]
+
+        frame_data = _extract_frames_ffmpeg(video_path, unique_ts)
+
+        def _nearest(t):
+            key = round(t, 1)
+            if key in frame_data:
+                return frame_data[key]
+            best = None
+            best_diff = float("inf")
+            for k in frame_data:
+                d = abs(k - t)
+                if d < best_diff:
+                    best_diff = d
+                    best = frame_data[k]
+            return best
+
+        results = {}
+        for info in all_times:
+            idx = info["idx"]
+
+            faces_found = 0
+            smiles_found = 0
+            for t in info["face_times"]:
+                fd = _nearest(t)
+                if fd is None:
+                    continue
+                gray = fd["gray"]
+                try:
+                    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(20, 20))
+                    if len(faces) > 0:
+                        faces_found += 1
+                        if smile_cascade is not None:
+                            for (fx, fy, fw, fh) in faces[:1]:
+                                roi = gray[fy:fy + fh, fx:fx + fw]
+                                smiles = smile_cascade.detectMultiScale(roi, scaleFactor=1.8, minNeighbors=15, minSize=(10, 10))
+                                if len(smiles) > 0:
+                                    smiles_found += 1
+                except Exception:
+                    pass
+
+            if faces_found >= 1 and smiles_found >= 1:
+                face_score = 1.0
+            elif faces_found >= 1:
+                face_score = 0.7
+            else:
+                face_score = 0.0
+
+            scene_frames = [fd for t in info["scene_times"] if (fd := _nearest(t)) is not None]
+
+            if len(scene_frames) >= 2:
+                diffs = []
+                grays = [f["gray"] for f in scene_frames]
+                for i2 in range(1, len(grays)):
+                    h1 = cv2.calcHist([grays[i2 - 1]], [0], None, [64], [0, 256])
+                    h2 = cv2.calcHist([grays[i2]], [0], None, [64], [0, 256])
+                    cv2.normalize(h1, h1)
+                    cv2.normalize(h2, h2)
+                    diffs.append(cv2.compareHist(h1, h2, cv2.HISTCMP_CORREL))
+                avg_corr = sum(diffs) / len(diffs)
+                change_score = 1.0 - avg_corr
+
+                brightness_scores = []
+                saturation_scores = []
+                for f in scene_frames:
+                    avg_v = np.mean(f["hsv"][:, :, 2]) / 255.0
+                    avg_s = np.mean(f["hsv"][:, :, 1]) / 255.0
+                    brightness_scores.append(avg_v)
+                    saturation_scores.append(avg_s)
+                avg_brightness = sum(brightness_scores) / len(brightness_scores) if brightness_scores else 0.5
+                avg_saturation = sum(saturation_scores) / len(saturation_scores) if saturation_scores else 0.3
+
+                visual_appeal = 0.0
+                if avg_brightness > 0.5:
+                    visual_appeal += 0.1
+                if avg_brightness > 0.65:
+                    visual_appeal += 0.1
+                if avg_saturation > 0.35:
+                    visual_appeal += 0.1
+                if avg_saturation > 0.5:
+                    visual_appeal += 0.1
+
+                scene_score = 0.3
+                if change_score > 0.5:
+                    scene_score = 0.9
+                elif change_score > 0.3:
+                    scene_score = 0.7
+                elif change_score > 0.15:
+                    scene_score = 0.5
+                scene_score = min(scene_score + visual_appeal, 1.0)
+            else:
+                scene_score = 0.5
+
+            results[idx] = {"faces": face_score, "scene": round(scene_score, 4)}
+
+        return results
+    except Exception:
+        return {i: {"faces": 0.5, "scene": 0.5} for i in range(len(segments))}
 
 
 def score_face_presence(video_path=None, start_time=0.0, end_time=0.0):
@@ -655,22 +868,30 @@ def _generate_hook_line(text, tier):
 
 
 def score_segment(segment, niche_keywords=None, video_path=None,
-                  audio_path=None, transcript_path=None, feedback_data=None):
+                  audio_path=None, transcript_path=None, feedback_data=None,
+                  audio_cache=None, video_data=None):
     text = segment.get("text", "")
     duration = segment.get("duration", 30)
     start_time = segment.get("startTime", 0)
     end_time = segment.get("endTime", start_time + duration)
+    seg_idx = segment.get("index", 0)
+
+    face_score = 0.5
+    scene_score_val = 0.5
+    if video_data and seg_idx in video_data:
+        face_score = video_data[seg_idx]["faces"]
+        scene_score_val = video_data[seg_idx]["scene"]
 
     scores = {
         "hookStrength": score_hook_strength(text),
         "keywordTrigger": score_keyword_trigger(text),
         "novelty": score_novelty(text),
         "clarity": score_clarity(duration, text),
-        "emotionalEnergy": score_emotional_energy(text, audio_path, start_time, end_time),
+        "emotionalEnergy": score_emotional_energy(text, audio_path, start_time, end_time, audio_cache=audio_cache),
         "textSentiment": score_text_sentiment(text),
         "pauseStructure": score_pause_structure(text, duration, transcript_path, start_time, end_time),
-        "facePresence": score_face_presence(video_path, start_time, end_time),
-        "sceneChange": score_scene_change(video_path, start_time, end_time),
+        "facePresence": face_score,
+        "sceneChange": scene_score_val,
         "topicFit": score_topic_fit(text, niche_keywords),
         "historyScore": score_history(feedback_data, text),
     }
@@ -712,8 +933,12 @@ def main():
         audio_path = args.audio if args.audio and os.path.exists(args.audio) else None
         transcript_path = args.transcript if args.transcript and os.path.exists(args.transcript) else None
 
+        audio_cache = _load_audio_cache(audio_path)
+        video_data = _batch_analyze_video(args.video, segments)
+
         scored = [score_segment(s, niche_keywords, video_path=args.video,
-                                audio_path=audio_path, transcript_path=transcript_path)
+                                audio_path=audio_path, transcript_path=transcript_path,
+                                audio_cache=audio_cache, video_data=video_data)
                   for s in segments]
         scored.sort(key=lambda x: x["finalScore"], reverse=True)
 
