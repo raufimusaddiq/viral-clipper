@@ -1,5 +1,6 @@
 services:
   backend:
+    image: viralvideo-backend:latest
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -22,6 +23,7 @@ services:
       retries: 3
 
   frontend:
+    image: viralvideo-frontend:latest
     build:
       context: .
       dockerfile: frontend/Dockerfile
