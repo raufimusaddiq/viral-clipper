@@ -1,13 +1,13 @@
 # Viral Clipper
 
-AI-powered video clip maker for Indonesian TikTok content. Imports YouTube/local videos, transcribes with Whisper (GPU), segments into clips, scores for viral potential, renders 9:16 vertical clips with auto-subtitles.
+AI-powered video clip maker for Indonesian TikTok content. Imports YouTube/local videos, transcribes with Whisper (GPU), segments into clips, scores for viral potential with self-learning weights, renders 9:16 vertical clips with auto-subtitles and TikTok-ready title/description.
 
 ## Stack
 
 | Component | Tech |
 |-----------|------|
 | Backend API | Spring Boot 3.2 (Java 17) |
-| AI Pipeline | Python 3 + faster-whisper (CUDA) |
+| AI Pipeline | Python 3 + faster-whisper (CUDA) + OpenCV + NumPy |
 | Frontend | Next.js 14 |
 | Database | SQLite |
 | Deployment | Docker Compose + NVIDIA GPU |
@@ -15,17 +15,17 @@ AI-powered video clip maker for Indonesian TikTok content. Imports YouTube/local
 ## Architecture
 
 ```
-YouTube URL ──► Backend API ──► 9-Stage Pipeline
-                                    │
-                    1. Import Video (yt-dlp)
-                    2. Extract Audio (ffmpeg)
-                    3. Transcribe (Whisper medium, CUDA)
-                    4. Segment (gap-based)
-                    5. Score (10-feature weighted formula)
-                    6. Render 9:16 (ffmpeg)
-                    7. Burn Subtitles (ffmpeg drawtext)
-                    8. Generate Variations (zoom/crop presets)
-                    9. Analytics (distribution, recommendations)
+YouTube URL ──► Backend API ──► 11-Stage Pipeline
+                                     │
+                     1. Import Video (yt-dlp)
+                     2. Extract Audio (ffmpeg)
+                     3. Transcribe (Whisper medium, CUDA)
+                     4. Segment (gap-based)
+                     5. Score (11-feature multimodal formula)
+                     6. Render 9:16 (ffmpeg)
+                     7. Burn Subtitles (ffmpeg drawtext)
+                     8. Generate Variations (zoom/crop presets)
+                     9. Analytics (distribution, recommendations)
                                     │
                               Frontend UI ◄── polling
 ```
@@ -69,30 +69,52 @@ copy .env.example .env
 1. Open http://localhost:3000
 2. Paste a YouTube URL → **Import & Process**
 3. Pipeline runs all 9 stages automatically
-4. Browse clips grouped by video, filter by tier (Viral / Potential / Skip)
-5. Preview clips in-app, download or export with subtitles
+4. Browse clips grouped by video, filter by tier (PRIMARY / BACKUP / SKIP)
+5. Preview clips in-app, copy TikTok title/description, download or export with subtitles
+6. Submit TikTok performance data via the **FB** button on each clip
+7. After 5+ feedback records, retrain weights from the **Learning** tab
 
-## Scoring
+## Scoring Engine v4
 
-Clips are scored on 10 weighted features with Indonesian keyword heuristics:
+Clips are scored on 11 weighted multimodal features with Indonesian keyword heuristics:
 
-| Feature | Weight | Description |
-|---------|--------|-------------|
-| Hook Strength | 20% | Question/hook phrase in opening |
-| Keyword Trigger | 10% | Indonesian viral keywords |
-| Novelty | 10% | Numbers, proper nouns, step words |
+| Feature | Weight | Signal |
+|---------|--------|--------|
+| Hook Strength | 18% | Question/hook phrase in opening |
+| Keyword Trigger | 9% | Indonesian viral keywords |
+| Novelty | 9% | Numbers, proper nouns, step/surprise words |
 | Clarity | 10% | Duration + context words |
-| Emotional Energy | 10% | Energy level (placeholder for ML) |
-| Face Presence | 10% | Face detection score |
-| Pause Structure | 7% | Speech rhythm quality |
-| Scene Change | 8% | Visual change rate |
+| Emotional Energy | 9% | Audio RMS energy (60%) + text emotion (40%) |
+| Text Sentiment | 5% | Indonesian positive/negative word polarity |
+| Pause Structure | 7% | Actual silence gaps from transcript |
+| Face Presence | 10% | OpenCV face + smile expression detection |
+| Scene Change | 8% | Histogram diff + color brightness/saturation |
 | Topic Fit | 8% | Niche keyword match |
-| History Score | 7% | Historical performance |
+| History Score | 7% | Similar past clips via feedback lookup |
 
-Boosts: sharp questions, opinion conflicts, numbered lists, emotional moments
+Boosts: sharp questions, opinion conflicts, numbered lists, emotional moments, conversational tone
 Penalties: slow openings, excessive silence, generic content, no face
 
 Tiers: **PRIMARY** (>= 0.80), **BACKUP** (>= 0.65), **SKIP** (< 0.65)
+
+### Self-Learning
+
+Weights are externalized in `weights.json`. The system learns from real TikTok performance data:
+
+1. Post a clip to TikTok, enter views/likes/comments/shares/saves via the feedback form
+2. System calculates a viral score from your metrics
+3. After 5+ feedback records, click **Retrain Weights** in the Learning tab
+4. Pearson correlation per feature + EMA blending (alpha=0.3) updates weights
+5. Next scoring run uses the improved weights automatically
+
+## Title & Description Generation
+
+Every scored clip gets auto-generated TikTok-ready copy:
+
+- **Title**: First question or hook phrase + relevant hashtags (max 100 chars)
+- **Description**: Hook line + content summary + 7 hashtags + CTA
+
+One-click **Copy** button on each clip card for pasting directly into TikTok.
 
 ## Project Layout
 
@@ -103,15 +125,18 @@ Tiers: **PRIMARY** (>= 0.80), **BACKUP** (>= 0.65), **SKIP** (< 0.65)
 ├── ai-pipeline/         Python CLI scripts (stages 1-9)
 │   ├── transcribe.py    Whisper transcription
 │   ├── segment.py       Gap-based segmentation
-│   ├── score.py         10-feature viral scoring
+│   ├── score.py         11-feature multimodal scoring + title/description
 │   ├── render.py        9:16 ffmpeg rendering
 │   ├── subtitle.py      Word-level subtitle burning
 │   ├── variation.py     Zoom/crop variation generator
 │   ├── analytics.py     Distribution + recommendations
+│   ├── feedback.py      Viral score calculation from TikTok metrics
+│   ├── learn_weights.py Pearson correlation + EMA weight training
+│   ├── weights.json     Externalized scoring weights
 │   ├── utils/           Audio/video analysis helpers
-│   └── tests/           126 tests, 90% coverage
+│   └── tests/           175 tests
 ├── frontend/            Next.js 14 web UI
-│   └── src/app/         Video grouping, clip cards, transcript view
+│   └── src/app/         Video grouping, clip cards, feedback, learning tab
 ├── scripts/             PowerShell automation
 ├── docs/                Architecture & API specs
 ├── docker-compose.yml   Full stack orchestration
@@ -141,6 +166,9 @@ Copy `.env.example` to `.env` for local overrides. Docker uses `.env.docker` (co
 | GET | /api/videos | List all videos |
 | GET | /api/videos/{id}/clips | Clips for video |
 | GET | /api/clips/{id} | Clip + score breakdown |
+| POST | /api/clips/{id}/feedback | Submit TikTok performance data |
+| POST | /api/feedback/train | Retrain scoring weights |
+| GET | /api/feedback/weights | Current weights + learning stats |
 | GET | /api/clips/{id}/preview | Stream rendered clip |
 | GET | /api/clips/{id}/export | Download exported clip |
 

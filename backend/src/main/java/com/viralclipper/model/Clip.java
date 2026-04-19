@@ -32,6 +32,10 @@ public class Clip {
     @Column(name = "text_content")
     private String textContent;
 
+    private String title;
+
+    private String description;
+
     @Column(name = "render_status", nullable = false)
     private String renderStatus = "PENDING";
 
@@ -67,6 +71,10 @@ public class Clip {
     public void setDurationSec(Double durationSec) { this.durationSec = durationSec; }
     public String getTextContent() { return textContent; }
     public void setTextContent(String textContent) { this.textContent = textContent; }
+    public String getTitle() { return title; }
+    public void setTitle(String title) { this.title = title; }
+    public String getDescription() { return description; }
+    public void setDescription(String description) { this.description = description; }
     public String getRenderStatus() { return renderStatus; }
     public void setRenderStatus(String renderStatus) { this.renderStatus = renderStatus; }
     public String getRenderPath() { return renderPath; }
