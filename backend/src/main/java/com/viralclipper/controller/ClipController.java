@@ -63,10 +63,12 @@ public class ClipController {
 
     @GetMapping("/clips/{clipId}/preview")
     public ResponseEntity<Resource> previewClip(@PathVariable String clipId) {
-        return clipService.getClip(clipId)
-                .filter(c -> c.getRenderPath() != null)
-                .map(c -> serveFile(c.getRenderPath(), VIDEO_MP4, false))
-                .orElse(ResponseEntity.notFound().build());
+        var clipOpt = clipService.getClip(clipId);
+        if (clipOpt.isEmpty()) return ResponseEntity.notFound().build();
+        Clip c = clipOpt.get();
+        String path = c.getExportPath() != null ? c.getExportPath() : c.getRenderPath();
+        if (path == null) return ResponseEntity.notFound().build();
+        return serveFile(path, VIDEO_MP4, false);
     }
 
     @GetMapping("/clips/{clipId}/export")

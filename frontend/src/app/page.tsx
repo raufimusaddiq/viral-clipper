@@ -29,6 +29,7 @@ type StageStatus = {
   status: string;
   startedAt: string | null;
   completedAt: string | null;
+  outputPath?: string;
 };
 
 type Clip = {
@@ -164,6 +165,7 @@ function ProgressBar({ stages }: { stages: StageStatus[] }) {
   const completed = stages.filter(s => s.status === 'COMPLETED').length;
   const current = stages.find(s => s.status === 'RUNNING' || s.status === 'IN_PROGRESS');
   const pct = Math.round((completed / total) * 100);
+  const renderStage = stages.find(s => s.stage === 'RENDER' && (s.status === 'RUNNING' || s.status === 'IN_PROGRESS'));
 
   return (
     <div className="space-y-2">
@@ -174,6 +176,9 @@ function ProgressBar({ stages }: { stages: StageStatus[] }) {
       <div className="h-2 bg-zinc-800 rounded-full overflow-hidden">
         <div className="h-full bg-blue-500 rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
       </div>
+      {renderStage?.outputPath && (
+        <p className="text-xs text-blue-400">{renderStage.outputPath}</p>
+      )}
       <div className="grid grid-cols-3 gap-1 mt-2">
         {STAGE_ORDER.map((stage) => {
           const stageStatus = stages.find(s => s.stage === stage);
@@ -774,7 +779,7 @@ export default function Home() {
                       <div className="flex items-center gap-2 mb-1">
                         <span className={`w-2 h-2 rounded-full ${STATUS_COLORS[group.job?.status || 'PENDING'] || 'bg-zinc-500'}`} />
                         <span className="text-sm font-medium text-zinc-200 truncate">
-                          {group.video.sourceUrl || group.video.id.substring(0, 8)}
+                          {group.video.title || group.video.sourceUrl || group.video.id.substring(0, 8)}
                         </span>
                         <span className="text-xs text-zinc-500">{timeAgo(group.video.createdAt)}</span>
                       </div>
