@@ -93,3 +93,8 @@ CREATE TABLE IF NOT EXISTS clip_feedback (
 CREATE INDEX IF NOT EXISTS idx_stage_job ON stage_status(job_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_clip ON clip_feedback(clip_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_video ON clip_feedback(video_id);
+
+-- Migrations for existing databases
+ALTER TABLE clip ADD COLUMN title TEXT;
+ALTER TABLE clip ADD COLUMN description TEXT;
+ALTER TABLE clip_score ADD COLUMN text_sentiment REAL;

@@ -137,8 +137,7 @@ function timeAgo(dateStr: string): string {
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
     return `${Math.floor(diff / 86400)}d ago`;
-  } catch {
-    return '';
+  } catch (_) { return '';
   }
 }
 
@@ -156,8 +155,7 @@ function videoLabel(video: Video): string {
     try {
       const url = new URL(video.sourceUrl);
       return url.hostname + url.pathname.substring(0, 30);
-    } catch {
-      return video.sourceUrl.substring(0, 40);
+    } catch (_) { return video.sourceUrl.substring(0, 40);
     }
   }
   return video.sourceUrl || video.id.substring(0, 8);
@@ -280,7 +278,7 @@ function ClipCard({
       });
       const data = result as { viralScore: number };
       setViralScore(data.viralScore);
-    } catch {} finally {
+    } catch (_) { /* noop */ } finally {
       setSubmitting(false);
     }
   };
@@ -490,7 +488,7 @@ function DiscoveryPanel({ api, onImport }: { api: ApiClient; onImport: (url: str
     setImportingIds(prev => new Set([...prev, video.videoId]));
     try {
       await onImport(video.url);
-    } catch {}
+    } catch (_) { /* noop */ }
     setImportingIds(prev => { const n = new Set(prev); n.delete(video.videoId); return n; });
   };
 
@@ -498,7 +496,7 @@ function DiscoveryPanel({ api, onImport }: { api: ApiClient; onImport: (url: str
     const top = results.filter(v => v.relevanceScore >= 0.6).slice(0, n);
     for (const v of top) {
       setImportingIds(prev => new Set([...prev, v.videoId]));
-      try { await onImport(v.url); } catch {}
+      try { await onImport(v.url); } catch (_) { /* noop */ }
       setImportingIds(prev => { const next = new Set(prev); next.delete(v.videoId); return next; });
     }
   };
@@ -640,12 +638,11 @@ export default function Home() {
         try {
           const detail = await api.getClip(clip.id) as ClipDetail;
           if (detail.scoreBreakdown) scores[clip.id] = detail.scoreBreakdown;
-        } catch {}
+        } catch (_) { /* noop */ }
       }
       setClipScores(prev => ({ ...prev, ...scores }));
       return clipList;
-    } catch {
-      return [];
+    } catch (_) { return [];
     }
   }, [api]);
 
@@ -671,7 +668,7 @@ export default function Home() {
           try {
             const jd = await api.getJob(job.id) as JobDetail;
             jobDetail = jd;
-          } catch {}
+          } catch (_) { /* noop */ }
         }
 
         if (job && (job.status === 'COMPLETED' || (runningJob && job.id === runningJob.id))) {
@@ -714,8 +711,8 @@ export default function Home() {
           total_feedback: ws.total_feedback as number,
           with_actual_scores: ws.with_actual_scores as number,
         });
-      } catch {}
-    } catch {}
+      } catch (_) { /* noop */ }
+    } catch (_) { /* noop */ }
     setInitialLoad(false);
   }, [api, fetchClipsForVideo]);
 
@@ -744,7 +741,7 @@ export default function Home() {
           return { ...g, job: data.job, jobDetail: data };
         }));
       }
-    } catch {}
+    } catch (_) { /* noop */ }
   }, [fetchClipsForVideo, stopPolling, api]);
 
   const startPolling = useCallback((jobId: string) => {
@@ -799,7 +796,7 @@ export default function Home() {
       setSelectedClips(new Set());
       const clips = await fetchClipsForVideo(videoId);
       setVideoGroups(prev => prev.map(g => g.video.id === videoId ? { ...g, clips } : g));
-    } catch {} finally {
+    } catch (_) { /* noop */ } finally {
       setExporting(false);
     }
   };
@@ -814,13 +811,13 @@ export default function Home() {
       <div className="flex gap-2 mb-6">
         <button onClick={() => setMainTab('import')} className={`px-6 py-2.5 rounded text-sm font-medium transition-colors ${
           mainTab === 'import' ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
-        }}}>Import & Clips</button>
+        }`}>Import & Clips</button>
         <button onClick={() => setMainTab('discovery')} className={`px-6 py-2.5 rounded text-sm font-medium transition-colors ${
           mainTab === 'discovery' ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
-        }}}>Discover</button>
+        }`}>Discover</button>
         <button onClick={() => setMainTab('learning')} className={`px-6 py-2.5 rounded text-sm font-medium transition-colors ${
           mainTab === 'learning' ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
-        }}}>
+        }`}>
           Learning {learningStats && learningStats.with_actual_scores > 0 ? `(${learningStats.with_actual_scores})` : ''}
         </button>
       </div>
@@ -920,7 +917,7 @@ export default function Home() {
                     {group.job && (group.job.status === 'RUNNING' || group.job.status === 'QUEUED') && (
                       <button onClick={async (e) => {
                         e.stopPropagation();
-                        try { await api.cancelJob(group.job!.id); await loadAllData(); } catch {}
+                        try { await api.cancelJob(group.job!.id); await loadAllData(); } catch (_) { /* noop */ }
                       }} className="ml-2 px-3 py-1 rounded text-xs font-medium bg-orange-600 text-white hover:bg-orange-500 transition-colors">
                         Cancel
                       </button>
@@ -929,7 +926,7 @@ export default function Home() {
                       <button onClick={async (e) => {
                         e.stopPropagation();
                         if (confirm('Delete this video and all its clips?')) {
-                          try { await api.deleteVideo(group.video.id); await loadAllData(); } catch {}
+                          try { await api.deleteVideo(group.video.id); await loadAllData(); } catch (_) { /* noop */ }
                         }
                       }} className="ml-2 px-3 py-1 rounded text-xs font-medium bg-red-700 text-white hover:bg-red-600 transition-colors">
                         Delete
@@ -1093,7 +1090,7 @@ export default function Home() {
                     total_feedback: ws.total_feedback as number,
                     with_actual_scores: ws.with_actual_scores as number,
                   });
-                } catch {} finally {
+    } catch (e) { console.error(e); } finally {
                   setTraining(false);
                 }
               }} disabled={training || !learningStats || learningStats.with_actual_scores < 5}
