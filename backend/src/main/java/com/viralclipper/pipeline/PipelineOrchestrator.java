@@ -144,7 +144,7 @@ public class PipelineOrchestrator {
 
             ProcessBuilder pb = new ProcessBuilder(
                     appConfig.getYtdlpPath(),
-                    "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+                    "-f", "bestvideo[vcodec^!=av01][ext=mp4]+bestaudio[ext=m4a]/bestvideo[vcodec^!=av01]+bestaudio/best[ext=mp4]",
                     "--merge-output-format", "mp4",
                     "--no-warnings",
                     "-o", outputPath,
@@ -159,6 +159,13 @@ public class PipelineOrchestrator {
                 }
             }
             int exit = p.waitFor();
+            File[] partFiles = new File(appConfig.getDataDir() + "/raw").listFiles((dir, name) -> name.endsWith(".part"));
+            if (partFiles != null) {
+                for (File f : partFiles) {
+                    log.info("Cleaning up stale partial download: {}", f.getName());
+                    f.delete();
+                }
+            }
             if (exit != 0) throw new RuntimeException("yt-dlp download failed (exit=" + exit + ")");
             if (!new File(outputPath).exists()) throw new RuntimeException("Downloaded file not found: " + outputPath);
             video.setFilePath(outputPath);

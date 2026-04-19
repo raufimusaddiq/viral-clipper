@@ -7,8 +7,12 @@ import com.viralclipper.pipeline.PipelineOrchestrator;
 import com.viralclipper.repository.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 
 @Service
@@ -119,5 +123,40 @@ public class JobService {
         }
 
         return job;
+    }
+
+    @EventListener(ApplicationReadyEvent.class)
+    public void recoverOrphanJobs() {
+        List<Job> running = jobRepository.findByStatus("RUNNING");
+        List<Job> queued = jobRepository.findByStatus("QUEUED");
+        List<Job> orphans = new ArrayList<>();
+        orphans.addAll(running);
+        orphans.addAll(queued);
+
+        Instant cutoff = Instant.now().minus(30, ChronoUnit.MINUTES);
+        int recovered = 0;
+
+        for (Job job : orphans) {
+            if (job.getUpdatedAt() != null) {
+                try {
+                    Instant updated = Instant.parse(job.getUpdatedAt());
+                    if (updated.isBefore(cutoff)) {
+                        job.setStatus("FAILED");
+                        job.setErrorMessage("Orphan job recovered on startup (was stuck in " +
+                                (running.contains(job) ? "RUNNING" : "QUEUED") + ")");
+                        jobRepository.save(job);
+                        recovered++;
+                        log.warn("Recovered orphan job {} (video {}), was stuck since {}",
+                                job.getId(), job.getVideoId(), job.getUpdatedAt());
+                    }
+                } catch (Exception e) {
+                    log.warn("Could not parse updatedAt for job {}: {}", job.getId(), job.getUpdatedAt());
+                }
+            }
+        }
+
+        if (recovered > 0) {
+            log.info("Recovered {} orphan jobs on startup", recovered);
+        }
     }
 }
