@@ -147,7 +147,7 @@ public class PipelineOrchestrator {
 
             ProcessBuilder pb = new ProcessBuilder(
                     appConfig.getYtdlpPath(),
-                    "-f", "bestvideo[vcodec^!=av01][ext=mp4]+bestaudio[ext=m4a]/bestvideo[vcodec^!=av01]+bestaudio/best[ext=mp4]",
+                    "-f", "bv[vcodec^=avc1][ext=mp4]+ba[ext=m4a]/bv[vcodec^=avc1]+ba/b[ext=mp4]/b",
                     "--merge-output-format", "mp4",
                     "--no-warnings",
                     "-o", outputPath,
