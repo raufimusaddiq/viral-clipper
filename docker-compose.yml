@@ -8,6 +8,7 @@ services:
       - "8080:8080"
     volumes:
       - ./data:/app/data
+      - hf-cache:/root/.cache/huggingface
     env_file: .env.docker
     deploy:
       resources:
@@ -54,3 +55,6 @@ services:
     command: npm run lint
     profiles:
       - lint
+
+volumes:
+  hf-cache:
