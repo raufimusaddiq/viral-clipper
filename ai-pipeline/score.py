@@ -181,8 +181,18 @@ def _load_audio_cache(audio_path):
             samples = np.frombuffer(raw, dtype=dtype).astype(np.float64)
             if n_channels > 1:
                 samples = samples[::n_channels]
-            total_rms = np.sqrt(np.mean(samples ** 2))
-            return {"samples": samples, "framerate": framerate, "total_rms": total_rms}
+
+            use_gpu = False
+            try:
+                import cupy as cp
+                samples_gpu = cp.asarray(samples)
+                total_rms = float(cp.sqrt(cp.mean(samples_gpu ** 2)))
+                del samples_gpu
+                use_gpu = True
+            except ImportError:
+                total_rms = np.sqrt(np.mean(samples ** 2))
+
+            return {"samples": samples, "framerate": framerate, "total_rms": total_rms, "gpu": use_gpu}
     except Exception:
         return None
 
@@ -204,6 +214,17 @@ def _extract_audio_rms_ratio(audio_path, start_time, end_time, audio_cache=None)
         if start_sample >= end_sample:
             return None
         seg = samples[start_sample:end_sample]
+
+        if audio_cache.get("gpu"):
+            try:
+                import cupy as cp
+                seg_gpu = cp.asarray(seg)
+                seg_rms = float(cp.sqrt(cp.mean(seg_gpu ** 2)))
+                del seg_gpu
+                return seg_rms / total_rms
+            except Exception:
+                pass
+
         seg_rms = np.sqrt(np.mean(seg ** 2))
         return seg_rms / total_rms
     except Exception:
@@ -386,7 +407,7 @@ def _extract_frames_ffmpeg(video_path, timestamps):
             "ffmpeg", "-y",
             "-ss", f"{start:.3f}", "-to", f"{end:.3f}",
             "-i", video_path,
-            "-vf", "fps=1,scale=320:-2",
+            "-vf", "fps=1,scale=224:-2",
             "-q:v", "5",
             out_pattern
         ]
@@ -412,7 +433,7 @@ def _extract_frames_ffmpeg(video_path, timestamps):
                 out_path = os.path.join(tmpdir, f"s_{int(t * 1000)}.jpg")
                 cmd2 = [
                     "ffmpeg", "-y", "-ss", f"{t:.3f}", "-i", video_path,
-                    "-vframes", "1", "-q:v", "5", "-vf", "scale=320:-2",
+                    "-vframes", "1", "-q:v", "5", "-vf", "scale=224:-2",
                     out_path
                 ]
                 r = subprocess.run(cmd2, capture_output=True, timeout=15)
@@ -439,6 +460,136 @@ def _extract_frames_ffmpeg(video_path, timestamps):
 
 
 def _batch_analyze_video(video_path, segments):
+    if not video_path or not os.path.exists(video_path):
+        return {i: {"faces": 0.5, "scene": 0.5} for i in range(len(segments))}
+    try:
+        import mediapipe as mp
+        mp.solutions.face_detection
+        return _batch_analyze_video_mediapipe(video_path, segments)
+    except ImportError:
+        pass
+    return _batch_analyze_video_haar(video_path, segments)
+
+
+def _batch_analyze_video_mediapipe(video_path, segments):
+    if not video_path or not os.path.exists(video_path):
+        return {i: {"faces": 0.5, "scene": 0.5} for i in range(len(segments))}
+    try:
+        import cv2
+        import numpy as np
+        import mediapipe as mp
+
+        face_detector = mp.solutions.face_detection.FaceDetection(
+            model_selection=1, min_detection_confidence=0.5,
+        )
+
+        all_times = []
+        unique_ts = set()
+        for i, seg in enumerate(segments):
+            start = seg.get("startTime", 0)
+            dur = seg.get("duration", 30)
+            end = seg.get("endTime", start + dur)
+            mid = start + dur * 0.5
+            all_times.append({"idx": i, "face_times": [mid], "scene_times": [start, mid, end]})
+            for t in [mid, start, end]:
+                unique_ts.add(round(t, 1))
+
+        unique_ts = sorted(unique_ts)
+        if len(unique_ts) > 60:
+            step = len(unique_ts) / 60
+            unique_ts = [unique_ts[int(i * step)] for i in range(60)]
+
+        frame_data = _extract_frames_ffmpeg(video_path, unique_ts)
+
+        def _nearest(t):
+            key = round(t, 1)
+            if key in frame_data:
+                return frame_data[key]
+            best = None
+            best_diff = float("inf")
+            for k in frame_data:
+                d = abs(k - t)
+                if d < best_diff:
+                    best_diff = d
+                    best = frame_data[k]
+            return best
+
+        results = {}
+        for info in all_times:
+            idx = info["idx"]
+
+            faces_found = 0
+            for t in info["face_times"]:
+                fd = _nearest(t)
+                if fd is None:
+                    continue
+                try:
+                    rgb = cv2.cvtColor(fd["gray"], cv2.COLOR_GRAY2RGB)
+                    detections = face_detector.process(rgb)
+                    if detections.detections:
+                        faces_found += 1
+                except Exception:
+                    pass
+
+            if faces_found >= 1:
+                face_score = 0.7
+            else:
+                face_score = 0.0
+
+            scene_frames = [fd for t in info["scene_times"] if (fd := _nearest(t)) is not None]
+
+            if len(scene_frames) >= 2:
+                diffs = []
+                grays = [f["gray"] for f in scene_frames]
+                for i2 in range(1, len(grays)):
+                    h1 = cv2.calcHist([grays[i2 - 1]], [0], None, [64], [0, 256])
+                    h2 = cv2.calcHist([grays[i2]], [0], None, [64], [0, 256])
+                    cv2.normalize(h1, h1)
+                    cv2.normalize(h2, h2)
+                    diffs.append(cv2.compareHist(h1, h2, cv2.HISTCMP_CORREL))
+                avg_corr = sum(diffs) / len(diffs)
+                change_score = 1.0 - avg_corr
+
+                brightness_scores = []
+                saturation_scores = []
+                for f in scene_frames:
+                    avg_v = np.mean(f["hsv"][:, :, 2]) / 255.0
+                    avg_s = np.mean(f["hsv"][:, :, 1]) / 255.0
+                    brightness_scores.append(avg_v)
+                    saturation_scores.append(avg_s)
+                avg_brightness = sum(brightness_scores) / len(brightness_scores) if brightness_scores else 0.5
+                avg_saturation = sum(saturation_scores) / len(saturation_scores) if saturation_scores else 0.3
+
+                visual_appeal = 0.0
+                if avg_brightness > 0.5:
+                    visual_appeal += 0.1
+                if avg_brightness > 0.65:
+                    visual_appeal += 0.1
+                if avg_saturation > 0.35:
+                    visual_appeal += 0.1
+                if avg_saturation > 0.5:
+                    visual_appeal += 0.1
+
+                scene_score = 0.3
+                if change_score > 0.5:
+                    scene_score = 0.9
+                elif change_score > 0.3:
+                    scene_score = 0.7
+                elif change_score > 0.15:
+                    scene_score = 0.5
+                scene_score = min(scene_score + visual_appeal, 1.0)
+            else:
+                scene_score = 0.5
+
+            results[idx] = {"faces": face_score, "scene": round(scene_score, 4)}
+
+        face_detector.close()
+        return results
+    except Exception:
+        return {i: {"faces": 0.5, "scene": 0.5} for i in range(len(segments))}
+
+
+def _batch_analyze_video_haar(video_path, segments):
     if not video_path or not os.path.exists(video_path):
         return {i: {"faces": 0.5, "scene": 0.5} for i in range(len(segments))}
     try:
@@ -933,8 +1084,12 @@ def main():
         audio_path = args.audio if args.audio and os.path.exists(args.audio) else None
         transcript_path = args.transcript if args.transcript and os.path.exists(args.transcript) else None
 
-        audio_cache = _load_audio_cache(audio_path)
-        video_data = _batch_analyze_video(args.video, segments)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            audio_future = pool.submit(_load_audio_cache, audio_path)
+            video_future = pool.submit(_batch_analyze_video, args.video, segments)
+            audio_cache = audio_future.result()
+            video_data = video_future.result()
 
         scored = [score_segment(s, niche_keywords, video_path=args.video,
                                 audio_path=audio_path, transcript_path=transcript_path,

@@ -11,7 +11,7 @@ def main():
     parser.add_argument("--audio", required=True, help="Path to WAV audio file")
     parser.add_argument("--output", help="Path to write transcript JSON")
     parser.add_argument("--language", default="id", help="Language code")
-    parser.add_argument("--model", default="medium", help="Whisper model size")
+    parser.add_argument("--model", default="large-v3-turbo", help="Whisper model size")
     parser.add_argument("--device", default="cuda", help="Device: cuda or cpu")
     args = parser.parse_args()
 

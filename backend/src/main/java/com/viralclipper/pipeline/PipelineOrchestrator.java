@@ -15,6 +15,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 @Component
 public class PipelineOrchestrator {
@@ -319,32 +322,57 @@ public class PipelineOrchestrator {
         StageStatus renderStage = stageStatusRepository.findByJobId(job.getId()).stream()
                 .filter(s -> "RENDER".equals(s.getStage())).findFirst().orElse(null);
 
-        int rendered = 0, failed = 0;
+        int maxParallelRenders = 2;
+        ExecutorService renderPool = Executors.newFixedThreadPool(maxParallelRenders);
+        List<Future<RenderResult>> futures = new ArrayList<>();
+
         for (int idx : toRender) {
             Job fresh = jobRepository.findById(job.getId()).orElse(job);
             if ("CANCELLED".equals(fresh.getStatus())) {
+                renderPool.shutdownNow();
                 throw new RuntimeException("Job cancelled by user");
             }
 
-            List<String> args = List.of(
-                    "--segments", segmentsPath,
-                    "--video", video.getFilePath(),
-                    "--output-dir", renderDir,
-                    "--clip-index", String.valueOf(idx)
-            );
+            final int clipIdx = idx;
+            final String segPath = segmentsPath;
+            final String vidPath = video.getFilePath();
+            final String rDir = renderDir;
+            futures.add(renderPool.submit(() -> {
+                List<String> args = List.of(
+                        "--segments", segPath,
+                        "--video", vidPath,
+                        "--output-dir", rDir,
+                        "--clip-index", String.valueOf(clipIdx)
+                );
+                try {
+                    JsonNode result = pythonRunner.runScript("render.py", args);
+                    return new RenderResult(clipIdx, true, result, null);
+                } catch (Exception e) {
+                    log.warn("Render failed for clip index {}: {}", clipIdx, e.getMessage());
+                    return new RenderResult(clipIdx, false, null, e.getMessage());
+                }
+            }));
+        }
 
+        renderPool.shutdown();
+
+        int rendered = 0, failed = 0;
+        for (Future<RenderResult> f : futures) {
             try {
-                JsonNode result = pythonRunner.runScript("render.py", args);
-                updateClipRenderStatuses(video.getId(), result);
-                rendered++;
+                RenderResult rr = f.get();
+                if (rr.success) {
+                    updateClipRenderStatuses(video.getId(), rr.result);
+                    rendered++;
+                } else {
+                    failed++;
+                }
+                if (renderStage != null) {
+                    renderStage.setOutputPath("Rendering " + (rendered + failed) + "/" + toRender.size() + " clips");
+                    stageStatusRepository.save(renderStage);
+                }
             } catch (Exception e) {
                 failed++;
-                log.warn("Render failed for clip index {}: {}", idx, e.getMessage());
-            }
-
-            if (renderStage != null) {
-                renderStage.setOutputPath("Rendering " + (rendered + failed) + "/" + toRender.size() + " clips");
-                stageStatusRepository.save(renderStage);
+                log.warn("Render future failed: {}", e.getMessage());
             }
         }
 
@@ -443,6 +471,20 @@ public class PipelineOrchestrator {
             if (!Files.exists(path)) {
                 try { Files.createDirectories(path); } catch (IOException e) { log.warn("Cannot create dir {}", path); }
             }
+        }
+    }
+
+    private static class RenderResult {
+        final int clipIndex;
+        final boolean success;
+        final JsonNode result;
+        final String error;
+
+        RenderResult(int clipIndex, boolean success, JsonNode result, String error) {
+            this.clipIndex = clipIndex;
+            this.success = success;
+            this.result = result;
+            this.error = error;
         }
     }
 

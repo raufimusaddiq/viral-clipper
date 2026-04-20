@@ -12,6 +12,16 @@ def find_ffmpeg():
     return os.environ.get("FFMPEG_PATH", "ffmpeg")
 
 
+def _detect_nvenc(ffmpeg_path):
+    try:
+        result = subprocess.run(
+            [ffmpeg_path, "-encoders"], capture_output=True, text=True, timeout=5
+        )
+        return "h264_nvenc" in result.stdout
+    except Exception:
+        return False
+
+
 VARIATION_PRESETS = {
     "zoom_center": {
         "label": "Zoom Center",
@@ -55,19 +65,24 @@ def generate_variation(video_path, start, end, output_path, preset_name, ffmpeg_
     frames = int(duration * fps)
     vf_extra = preset["vf_extra"].format(frames=frames)
     vf = f"scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,{vf_extra}"
+
+    use_nvenc = _detect_nvenc(ffmpeg_path)
+
     cmd = [
         ffmpeg_path,
         "-i", video_path,
         "-ss", str(start),
         "-to", str(end),
         "-vf", vf,
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "23",
-        "-c:a", "aac",
-        "-y",
-        output_path,
+        "-c:v", "h264_nvenc" if use_nvenc else "libx264",
     ]
+
+    if use_nvenc:
+        cmd.extend(["-preset", "p4", "-rc", "vbr", "-cq", "23"])
+    else:
+        cmd.extend(["-preset", "fast", "-crf", "23"])
+
+    cmd.extend(["-c:a", "aac", "-y", output_path])
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg variation failed: {result.stderr[-500:]}")
