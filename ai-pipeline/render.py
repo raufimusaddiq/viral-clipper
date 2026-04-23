@@ -1,37 +1,127 @@
 #!/usr/bin/env python3
-"""Render 9:16 vertical clips from scored segments using ffmpeg."""
+"""Render 9:16 vertical clips from scored segments using ffmpeg.
+
+GPU path: h264_nvenc with a runtime probe-encode (not just a string sniff of
+``-encoders``) so a non-functional NVENC (driver mismatch, busy session, etc.)
+falls back to libx264 for the affected clip instead of failing the whole stage.
+"""
 
 import argparse
 import json
 import os
 import subprocess
 import sys
+import tempfile
+
+
+_NVENC_CACHE = None
 
 
 def find_ffmpeg():
     return os.environ.get("FFMPEG_PATH", "ffmpeg")
 
 
+def _probe_nvenc(ffmpeg_path):
+    """Return True iff ``h264_nvenc`` is actually usable on this machine.
+
+    Caches the answer for the lifetime of the process. Cheaper than the old
+    string-sniff to fail, but only runs once per script invocation.
+    """
+    global _NVENC_CACHE
+    if _NVENC_CACHE is not None:
+        return _NVENC_CACHE
+    try:
+        listing = subprocess.run(
+            [ffmpeg_path, "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if "h264_nvenc" not in listing.stdout:
+            _NVENC_CACHE = False
+            return False
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            probe_out = tmp.name
+        try:
+            probe = subprocess.run(
+                [
+                    ffmpeg_path, "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi",
+                    "-i", "testsrc=size=128x128:rate=1:duration=1",
+                    "-vf", "format=yuv420p",
+                    "-c:v", "h264_nvenc", "-preset", "p4",
+                    "-frames:v", "1", "-y", probe_out,
+                ],
+                capture_output=True, text=True, timeout=10,
+            )
+            _NVENC_CACHE = probe.returncode == 0
+        finally:
+            try:
+                os.remove(probe_out)
+            except OSError:
+                pass
+        return _NVENC_CACHE
+    except Exception:
+        _NVENC_CACHE = False
+        return False
+
+
+# Back-compat alias — older callers/tests import this name.
+def _detect_nvenc(ffmpeg_path):
+    return _probe_nvenc(ffmpeg_path)
+
+
+def _build_render_cmd(ffmpeg_path, video_path, start, end, output_path, use_nvenc):
+    # Seek before -i so ffmpeg jumps to the nearest keyframe instead of
+    # decoding the whole upstream video — this is the single biggest win on
+    # long YouTube sources.
+    # ``format=yuv420p`` at the tail of the filter chain is the fix for
+    # 10-bit / yuv444p sources that NVENC H.264 rejects.
+    cmd = [
+        ffmpeg_path, "-hide_banner", "-loglevel", "error",
+        "-ss", str(start), "-to", str(end),
+        "-i", video_path,
+        "-vf",
+        "scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,format=yuv420p",
+    ]
+    if use_nvenc:
+        cmd.extend([
+            "-c:v", "h264_nvenc",
+            "-preset", "p4", "-tune", "hq",
+            "-rc", "vbr", "-cq", "23", "-b:v", "0",
+            "-spatial-aq", "1",
+        ])
+    else:
+        cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23"])
+    cmd.extend(["-c:a", "aac", "-y", output_path])
+    return cmd
+
+
 def render_clip(video_path, start, end, output_path, ffmpeg_path=None):
     if ffmpeg_path is None:
         ffmpeg_path = find_ffmpeg()
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    cmd = [
-        ffmpeg_path,
-        "-i", video_path,
-        "-ss", str(start),
-        "-to", str(end),
-        "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "23",
-        "-c:a", "aac",
-        "-y",
-        output_path,
-    ]
+
+    use_nvenc = _probe_nvenc(ffmpeg_path)
+    cmd = _build_render_cmd(ffmpeg_path, video_path, start, end, output_path, use_nvenc)
     result = subprocess.run(cmd, capture_output=True, text=True)
+
+    # Per-clip NVENC failure → retry once on libx264 so a driver hiccup or an
+    # unsupported source pixel format doesn't kill the whole stage.
+    if result.returncode != 0 and use_nvenc:
+        print(
+            f"WARN: h264_nvenc failed for {output_path}, falling back to libx264. "
+            f"stderr={result.stderr[-400:]}",
+            file=sys.stderr,
+        )
+        cmd = _build_render_cmd(
+            ffmpeg_path, video_path, start, end, output_path, use_nvenc=False,
+        )
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg render failed: {result.stderr[-500:]}")
+        raise RuntimeError(
+            f"ffmpeg render failed (cmd={' '.join(cmd)}): {result.stderr[-500:]}"
+        )
     return output_path
 
 
@@ -71,6 +161,14 @@ def main():
                     seg["endTime"],
                     output_path,
                 )
+                if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                    rendered.append({
+                        "rank": clip_id,
+                        "tier": seg.get("tier"),
+                        "status": "FAILED",
+                        "error": "Render produced empty file",
+                    })
+                    continue
                 rendered.append({
                     "rank": clip_id,
                     "tier": seg.get("tier"),
@@ -80,10 +178,11 @@ def main():
                     "endTime": seg["endTime"],
                 })
             except Exception as e:
+                if os.path.exists(output_path) and os.path.getsize(output_path) == 0:
+                    os.remove(output_path)
                 rendered.append({
                     "rank": clip_id,
                     "tier": seg.get("tier"),
-                    "path": output_path,
                     "status": "FAILED",
                     "error": str(e),
                 })

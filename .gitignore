@@ -43,6 +43,7 @@ backend/target/
 .vscode/
 .opencode/
 opencode.json
+.claude/settings.local.json
 *.iml
 *.swo
 *.swp

@@ -62,23 +62,21 @@ function Remove-OldImages {
         [int]$Keep
     )
 
-    $images = docker images $ImageName --format "{{.Repository}}:{{.Tag}} {{.CreatedAt}}" 2>$null
-    if (-not $images) { return }
+    # `docker images` already returns images newest-first, so we don't need
+    # to parse the locale-dependent CreatedAt column — just slice off the
+    # top `Keep` entries and drop the rest. Version tags are timestamp-
+    # prefixed (yyyyMMddHHmmss) so they sort identically whether we sort by
+    # name or by creation date.
+    $names = docker images $ImageName --format "{{.Repository}}:{{.Tag}}" 2>$null |
+             Where-Object { $_ -and $_ -notmatch "<none>" -and $_ -ne "${ImageName}:latest" } |
+             Sort-Object -Descending -Unique
 
-    $parsed = $images | Where-Object { $_ -notmatch "<none>" } | ForEach-Object {
-        $parts = $_ -split "\s+", 3
-        [PSCustomObject]@{
-            Name = $parts[0]
-            Created = [DateTime]::Parse($parts[1] + " " + $parts[2])
-        }
-    } | Sort-Object Created -Descending
+    if (-not $names) { return }
 
-    $toDelete = $parsed | Select-Object -Skip ($Keep + 1)
-    foreach ($img in $toDelete) {
-        if ($img.Name -ne "${ImageName}:latest") {
-            Write-Host "       Removing old image: $($img.Name)" -ForegroundColor DarkGray
-            docker rmi $img.Name 2>$null | Out-Null
-        }
+    $toDelete = $names | Select-Object -Skip $Keep
+    foreach ($name in $toDelete) {
+        Write-Host "       Removing old image: $name" -ForegroundColor DarkGray
+        docker rmi $name 2>$null | Out-Null
     }
 }
 

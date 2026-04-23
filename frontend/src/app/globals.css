@@ -1,16 +1,31 @@
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500;600&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* Vercel Geist aesthetic: white surface, black text, blue primary accent.
+   Minimal, technical, pixel-precise. Borders do the work, not shadows. */
+
 :root {
-  --background: #0a0a0a;
-  --foreground: #ededed;
+  color-scheme: light;
+  --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, 'SF Mono', 'Menlo', monospace;
 }
 
 body {
-  color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  font-feature-settings: "ss01", "ss03", "cv11";
+}
+
+::selection {
+  background-color: #0070F3;
+  color: #FFFFFF;
+}
+
+*:focus-visible {
+  outline: 2px solid #0070F3;
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .line-clamp-2 {
@@ -19,3 +34,19 @@ body {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #EAEAEA transparent;
+}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: #EAEAEA; border-radius: 4px; }
+*::-webkit-scrollbar-thumb:hover { background: #D4D4D4; }

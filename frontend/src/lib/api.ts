@@ -89,7 +89,37 @@ export class ApiClient {
     });
   }
 
-  async submitFeedback(clipId: string, metrics: { views: number; likes: number; comments: number; shares: number; saves: number }) {
+  async listCandidates(status?: string) {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+    return this.request(`/api/discover/candidates${qs}`);
+  }
+
+  async updateCandidateStatus(id: string, status: string) {
+    return this.request(`/api/discover/candidates/${id}/status`, {
+      method: 'POST',
+      body: JSON.stringify({ status }),
+    });
+  }
+
+  async queueCandidates(ids: string[]) {
+    return this.request('/api/discover/queue', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    });
+  }
+
+  async drainCandidateQueue() {
+    return this.request('/api/discover/queue/drain', { method: 'POST' });
+  }
+
+  async submitFeedback(
+    clipId: string,
+    metrics: {
+      views: number; likes: number; comments: number; shares: number; saves: number;
+      /** ISO-8601 timestamp when the clip was uploaded to TikTok (required). */
+      postedAt: string;
+    },
+  ) {
     return this.request(`/api/clips/${clipId}/feedback`, {
       method: 'POST',
       body: JSON.stringify(metrics),

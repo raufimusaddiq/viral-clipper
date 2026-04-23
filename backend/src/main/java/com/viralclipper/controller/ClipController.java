@@ -62,30 +62,35 @@ public class ClipController {
     }
 
     @GetMapping("/clips/{clipId}/preview")
-    public ResponseEntity<Resource> previewClip(@PathVariable String clipId) {
+    public ResponseEntity<?> previewClip(@PathVariable String clipId) {
         var clipOpt = clipService.getClip(clipId);
-        if (clipOpt.isEmpty()) return ResponseEntity.notFound().build();
+        if (clipOpt.isEmpty()) return ResponseEntity.status(404).body(Map.of("status", "error", "error", "Clip not found"));
         Clip c = clipOpt.get();
         String path = c.getExportPath() != null ? c.getExportPath() : c.getRenderPath();
-        if (path == null) return ResponseEntity.notFound().build();
+        if (path == null) return ResponseEntity.status(404).body(Map.of("status", "error", "error", "No rendered file available"));
         return serveFile(path, VIDEO_MP4, false);
     }
 
     @GetMapping("/clips/{clipId}/export")
-    public ResponseEntity<Resource> downloadClip(@PathVariable String clipId) {
-        return clipService.getClip(clipId)
-                .filter(c -> c.getExportPath() != null)
-                .map(c -> serveFile(c.getExportPath(), MediaType.APPLICATION_OCTET_STREAM, true))
-                .orElse(ResponseEntity.notFound().build());
+    public ResponseEntity<?> downloadClip(@PathVariable String clipId) {
+        var clipOpt = clipService.getClip(clipId);
+        if (clipOpt.isEmpty()) return ResponseEntity.status(404).body(Map.of("status", "error", "error", "Clip not found"));
+        Clip c = clipOpt.get();
+        if (c.getExportPath() == null) return ResponseEntity.status(404).body(Map.of("status", "error", "error", "No exported file available"));
+        return serveFile(c.getExportPath(), MediaType.APPLICATION_OCTET_STREAM, true);
     }
 
-    private ResponseEntity<Resource> serveFile(String filePath, MediaType mediaType, boolean asAttachment) {
+    private ResponseEntity<?> serveFile(String filePath, MediaType mediaType, boolean asAttachment) {
         File file = Paths.get(filePath).toFile();
-        if (!file.exists()) return ResponseEntity.notFound().build();
+        if (!file.exists() || file.length() == 0) {
+            return ResponseEntity.status(404).body(Map.of("status", "error", "error", "File not found or empty: " + file.getName()));
+        }
 
         FileSystemResource resource = new FileSystemResource(file);
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(mediaType);
+        headers.setContentLength(file.length());
+        headers.set(HttpHeaders.ACCEPT_RANGES, "bytes");
         if (asAttachment) {
             headers.set(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + file.getName() + "\"");
         }

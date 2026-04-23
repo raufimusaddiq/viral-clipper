@@ -418,6 +418,127 @@ class TestScoreSegment:
     def test_weights_sum_to_one(self):
         assert abs(sum(WEIGHTS.values()) - 1.0) < 0.001
 
+    def test_segment_emits_new_feature_scores(self):
+        """P3.5-B: motion and onsetDensity must appear in the scores dict."""
+        segment = {
+            "index": 0, "startTime": 0.0, "endTime": 10.0, "duration": 10.0,
+            "text": "Rahasia ini wajib kamu tahu!",
+        }
+        result = score_segment(segment)
+        assert "motion" in result["scores"]
+        assert "onsetDensity" in result["scores"]
+        assert 0.0 <= result["scores"]["motion"] <= 1.0
+        assert 0.0 <= result["scores"]["onsetDensity"] <= 1.0
+
+
+class TestNewFeatures:
+    """Unit tests for P3.5-B additions: motion, onset density, TF-IDF corpus."""
+
+    def test_motion_static_frames(self):
+        import numpy as np
+        from features.visual import _calc_motion_from_grays
+        frame = np.zeros((64, 64), dtype=np.uint8)
+        # identical frames → near-zero flow → low motion score
+        result = _calc_motion_from_grays([frame.copy(), frame.copy(), frame.copy()])
+        assert result <= 0.5
+
+    def test_motion_changing_frames_scores_higher_than_static(self):
+        import numpy as np
+        from features.visual import _calc_motion_from_grays
+        # We don't pin absolute calibration (depends on Farneback + image size),
+        # only that a shifting image scores at least as high as a static one.
+        h, w = 128, 128
+        rng = np.random.default_rng(0)
+        tex = rng.integers(0, 255, (h, w), dtype=np.uint8)
+        static_score = _calc_motion_from_grays([tex, tex, tex])
+        moving_frames = [tex, np.roll(tex, 10, axis=1), np.roll(tex, 20, axis=1)]
+        moving_score = _calc_motion_from_grays(moving_frames)
+        assert moving_score >= static_score
+
+    def test_motion_empty_list(self):
+        from features.visual import _calc_motion_from_grays
+        assert _calc_motion_from_grays([]) == 0.5
+        assert _calc_motion_from_grays([None]) == 0.5  # also handled
+
+    def test_onset_density_none_cache(self):
+        from features.audio import score_onset_density
+        assert score_onset_density(None, 0.0, 5.0) == 0.5
+
+    def test_onset_density_flat_audio(self):
+        import numpy as np
+        from features.audio import score_onset_density
+        # Constant tone = no onsets → low density
+        samples = np.ones(16000 * 3, dtype=np.float64) * 1000
+        cache = {"samples": samples, "framerate": 16000, "total_rms": 1000.0, "gpu": False}
+        result = score_onset_density(cache, 0.0, 3.0)
+        assert result <= 0.5
+
+    def test_onset_density_peaky_audio(self):
+        import numpy as np
+        from features.audio import score_onset_density
+        # Quiet noise with sparse bursts every ~400 ms. Each burst straddles a
+        # single 100 ms window, so neighbors stay quiet and the peak stands out.
+        rng = np.random.default_rng(42)
+        framerate = 16000
+        duration_s = 4.0
+        n = int(framerate * duration_s)
+        samples = rng.standard_normal(n) * 50  # quiet background
+        for burst_t in np.arange(0.2, duration_s, 0.4):
+            i = int(burst_t * framerate)
+            samples[i:i + 800] = 5000  # 50 ms-wide burst
+        cache = {
+            "samples": samples, "framerate": framerate,
+            "total_rms": float(np.sqrt(np.mean(samples ** 2))), "gpu": False,
+        }
+        result = score_onset_density(cache, 0.0, duration_s)
+        assert result > 0.3
+
+    def test_corpus_loader_missing_dir(self, monkeypatch, tmp_path):
+        import features.text as text_mod
+        monkeypatch.setattr(text_mod, "_CORPUS_DIR", str(tmp_path / "does-not-exist"))
+        monkeypatch.setattr(text_mod, "_CORPUS_IDF", None)
+        assert text_mod._load_keyword_corpus() is None
+
+    def test_supervised_predict_returns_none_without_model(self, monkeypatch, tmp_path):
+        import features.supervised as sup_mod
+        monkeypatch.setattr(sup_mod, "MODEL_PATH", str(tmp_path / "missing.lgb"))
+        sup_mod.reset_cache()
+        assert sup_mod.predict({"hookStrength": 0.9}) is None
+        assert sup_mod.is_model_loaded() is False
+
+    def test_train_scorer_refuses_below_threshold(self):
+        # train_scorer.evaluate must guard the write against tiny datasets.
+        from train_scorer import evaluate
+        records = [
+            {"features": {"a": 0.1, "b": 0.2}, "actual_viral_score": 0.5},
+            {"features": {"a": 0.3, "b": 0.4}, "actual_viral_score": 0.6},
+        ]
+        result = evaluate(records, min_rows=200, write_model=True)
+        assert result["status"] == "insufficient_data"
+        assert result["rows"] == 2
+        assert result["min_required"] == 200
+
+    def test_corpus_loader_builds_idf(self, monkeypatch, tmp_path):
+        import features.text as text_mod
+        corpus_dir = tmp_path / "corpus"
+        corpus_dir.mkdir()
+        (corpus_dir / "a.txt").write_text(
+            "rahasia penting wajib simak ternyata", encoding="utf-8"
+        )
+        (corpus_dir / "b.txt").write_text(
+            "rahasia trik jangan mantap berguna", encoding="utf-8"
+        )
+        (corpus_dir / "c.txt").write_text(
+            "penting fakta mengejutkan perhatikan", encoding="utf-8"
+        )
+        monkeypatch.setattr(text_mod, "_CORPUS_DIR", str(corpus_dir))
+        monkeypatch.setattr(text_mod, "_CORPUS_IDF", None)
+        idf = text_mod._load_keyword_corpus()
+        assert idf is not None
+        # "rahasia" appears in 2 of 3 docs (≤ 80%), should be included
+        assert "rahasia" in idf
+        assert idf["rahasia"] > 0
+
     def test_score_capped_at_one(self):
         segment = {
             "index": 0,
@@ -654,7 +775,9 @@ class TestConstants:
     def test_all_weights_present(self):
         expected = {"hookStrength", "keywordTrigger", "novelty", "clarity",
                      "emotionalEnergy", "textSentiment", "pauseStructure", "facePresence",
-                     "sceneChange", "topicFit", "historyScore"}
+                     "sceneChange", "topicFit", "historyScore",
+                     # P3.5-B additions
+                     "motion", "onsetDensity"}
         assert set(WEIGHTS.keys()) == expected
 
     def test_hook_phrases_are_indonesian(self):
@@ -724,6 +847,107 @@ class TestRenderScript:
         assert output["data"]["failedCount"] >= 1
 
 
+class TestRenderNvencFallback:
+    """Covers the P0 NVENC regression fix: probe-based detection + libx264 fallback."""
+
+    def _reset_cache(self):
+        import render as render_mod
+        render_mod._NVENC_CACHE = None
+
+    def test_build_cmd_seeks_before_input(self):
+        import render as render_mod
+        cmd = render_mod._build_render_cmd(
+            "ffmpeg", "/tmp/src.mp4", 1.5, 3.5, "/tmp/out.mp4", use_nvenc=False,
+        )
+        assert "-i" in cmd
+        i_idx = cmd.index("-i")
+        ss_idx = cmd.index("-ss")
+        to_idx = cmd.index("-to")
+        assert ss_idx < i_idx and to_idx < i_idx, "-ss/-to must precede -i for fast seek"
+
+    def test_build_cmd_includes_yuv420p(self):
+        import render as render_mod
+        cmd = render_mod._build_render_cmd(
+            "ffmpeg", "/tmp/src.mp4", 0.0, 1.0, "/tmp/out.mp4", use_nvenc=True,
+        )
+        vf = cmd[cmd.index("-vf") + 1]
+        assert "format=yuv420p" in vf
+        assert "h264_nvenc" in cmd
+
+    def test_build_cmd_libx264_when_no_nvenc(self):
+        import render as render_mod
+        cmd = render_mod._build_render_cmd(
+            "ffmpeg", "/tmp/src.mp4", 0.0, 1.0, "/tmp/out.mp4", use_nvenc=False,
+        )
+        assert "libx264" in cmd
+        assert "h264_nvenc" not in cmd
+
+    def test_probe_returns_false_when_encoder_missing(self, monkeypatch):
+        import render as render_mod
+        self._reset_cache()
+
+        class FakeResult:
+            returncode = 0
+            stdout = "V..... libx264  H.264 / ...\n"  # no nvenc
+
+        monkeypatch.setattr(
+            render_mod.subprocess, "run",
+            lambda *a, **k: FakeResult(),
+        )
+        assert render_mod._probe_nvenc("ffmpeg") is False
+
+    def test_probe_caches_result(self, monkeypatch):
+        import render as render_mod
+        self._reset_cache()
+
+        calls = {"n": 0}
+
+        class FakeResult:
+            returncode = 0
+            stdout = ""  # no nvenc → early-return False
+
+        def fake_run(*a, **k):
+            calls["n"] += 1
+            return FakeResult()
+
+        monkeypatch.setattr(render_mod.subprocess, "run", fake_run)
+        render_mod._probe_nvenc("ffmpeg")
+        render_mod._probe_nvenc("ffmpeg")
+        render_mod._probe_nvenc("ffmpeg")
+        assert calls["n"] == 1, "probe must be cached after first call"
+
+    def test_render_clip_falls_back_to_libx264_on_nvenc_failure(
+        self, monkeypatch, tmp_path,
+    ):
+        import render as render_mod
+        self._reset_cache()
+        render_mod._NVENC_CACHE = True  # pretend NVENC is available
+
+        calls = []
+
+        class FakeResult:
+            def __init__(self, rc, stderr=""):
+                self.returncode = rc
+                self.stderr = stderr
+                self.stdout = ""
+
+        def fake_run(cmd, *a, **k):
+            calls.append(cmd)
+            # First call uses NVENC → simulate NVENC-specific failure.
+            if "h264_nvenc" in cmd:
+                return FakeResult(1, stderr="h264_nvenc @ 0x0 No NVENC capable devices found")
+            # Fallback libx264 call → success.
+            return FakeResult(0)
+
+        monkeypatch.setattr(render_mod.subprocess, "run", fake_run)
+        out = tmp_path / "out.mp4"
+        render_mod.render_clip("/tmp/in.mp4", 0.0, 1.0, str(out), ffmpeg_path="ffmpeg")
+
+        assert len(calls) == 2
+        assert "h264_nvenc" in calls[0]
+        assert "libx264" in calls[1]
+
+
 # -- Subtitle tests --
 
 
@@ -732,6 +956,58 @@ from subtitle import (
     build_subtitle_filter,
     escape_drawtext as subtitle_escape,
 )
+
+
+class TestSubtitleNvencFallback:
+    def _reset_cache(self):
+        import subtitle as sub_mod
+        sub_mod._NVENC_CACHE = None
+
+    def test_burn_cmd_null_filter_still_applies_format(self):
+        import subtitle as sub_mod
+        cmd = sub_mod._build_burn_cmd(
+            "ffmpeg", "/tmp/in.mp4", "null", "/tmp/out.mp4", use_nvenc=True,
+        )
+        vf = cmd[cmd.index("-vf") + 1]
+        assert vf == "format=yuv420p"
+        assert "h264_nvenc" in cmd
+
+    def test_burn_cmd_appends_format_after_filter(self):
+        import subtitle as sub_mod
+        cmd = sub_mod._build_burn_cmd(
+            "ffmpeg", "/tmp/in.mp4", "drawtext=text='x'", "/tmp/out.mp4", use_nvenc=False,
+        )
+        vf = cmd[cmd.index("-vf") + 1]
+        assert vf.endswith(",format=yuv420p")
+        assert "libx264" in cmd
+
+    def test_burn_falls_back_to_libx264_on_nvenc_failure(self, monkeypatch, tmp_path):
+        import subtitle as sub_mod
+        self._reset_cache()
+        sub_mod._NVENC_CACHE = True
+
+        calls = []
+
+        class FakeResult:
+            def __init__(self, rc, stderr=""):
+                self.returncode = rc
+                self.stderr = stderr
+                self.stdout = ""
+
+        def fake_run(cmd, *a, **k):
+            calls.append(cmd)
+            if "h264_nvenc" in cmd:
+                return FakeResult(1, stderr="nvenc driver error")
+            return FakeResult(0)
+
+        monkeypatch.setattr(sub_mod.subprocess, "run", fake_run)
+        sub_mod.burn_subtitles(
+            "/tmp/clip.mp4", "null", str(tmp_path / "out.mp4"), ffmpeg_path="ffmpeg",
+        )
+
+        assert len(calls) == 2
+        assert "h264_nvenc" in calls[0]
+        assert "libx264" in calls[1]
 
 
 class TestBuildWordTimeline:
@@ -1285,6 +1561,19 @@ class TestCalculateViralScore:
         score = calculate_viral_score(5000, 200, 50, 30, 20)
         assert 0.0 <= score <= 1.0
 
+    def test_hours_since_post_normalizes_velocity(self):
+        # Same raw counts but 10× longer on platform → lower score because
+        # the per-day velocity is 10× smaller.
+        fresh = calculate_viral_score(10000, 500, 50, 30, 20, hours_since_post=2)
+        stale = calculate_viral_score(10000, 500, 50, 30, 20, hours_since_post=20)
+        assert fresh > stale, f"expected fresh ({fresh}) > stale ({stale})"
+
+    def test_hours_since_post_default_still_works(self):
+        # Back-compat: callers that don't pass hours_since_post still get a
+        # non-zero score (legacy api.ts paths before this reform).
+        score = calculate_viral_score(10000, 500, 50, 30, 20)
+        assert score > 0.0
+
 
 class TestFeedbackScript:
     def test_calc_viral_score(self, tmp_path):
@@ -1419,3 +1708,105 @@ class TestScoreHistoryWithFeedback:
         ]
         result = score_history(feedback_data=feedback, text="rahasia penting teknologi")
         assert result == 0.5
+
+
+# -- Discovery: transcript sampling + predicted score --
+
+
+class TestDiscoveryVTTParser:
+    def test_strips_timing_and_tags(self, tmp_path):
+        import discover
+        vtt = tmp_path / "s.vtt"
+        vtt.write_text(
+            "WEBVTT\nKind: captions\nLanguage: id\n\n"
+            "00:00:00.000 --> 00:00:02.000\nHalo semuanya\n\n"
+            "00:00:02.000 --> 00:00:04.000\n<c>Ini</c> rahasia penting\n",
+            encoding="utf-8",
+        )
+        text = discover._vtt_to_text(str(vtt), 500)
+        assert "Halo semuanya" in text
+        assert "Ini rahasia penting" in text
+        assert "-->" not in text
+        assert "<c>" not in text
+        assert "WEBVTT" not in text
+
+    def test_dedupes_rolling_duplicates(self, tmp_path):
+        import discover
+        vtt = tmp_path / "s.vtt"
+        vtt.write_text(
+            "WEBVTT\n\n"
+            "00:00:00.000 --> 00:00:01.000\nHalo\n\n"
+            "00:00:01.000 --> 00:00:02.000\nHalo\n\n"
+            "00:00:02.000 --> 00:00:03.000\nHalo dunia\n",
+            encoding="utf-8",
+        )
+        text = discover._vtt_to_text(str(vtt), 500)
+        # "Halo" twice collapses to once; "Halo dunia" is different so kept
+        assert text.count("Halo") >= 2  # "Halo" + "Halo dunia"
+        assert text == "Halo Halo dunia"
+
+    def test_returns_empty_on_missing_file(self):
+        import discover
+        assert discover._vtt_to_text("/nonexistent/path.vtt", 500) == ""
+
+
+class TestPredictClipPotential:
+    def test_viral_keywords_score_high(self):
+        import discover
+        t, p = discover.predict_clip_potential(
+            "Ternyata rahasia ini jarang diketahui. Fakta mengejutkan tentang sukses. Penting banget buat kamu.",
+            duration=300, view_count=50000, age_hours=24,
+        )
+        assert t > 0.5
+        assert p > 0.5
+
+    def test_bland_text_scores_low(self):
+        import discover
+        t, p = discover.predict_clip_potential(
+            "Hari ini saya masak. Kemarin cuaca biasa saja.",
+            duration=60, view_count=100, age_hours=720,
+        )
+        assert t < 0.5
+        assert p < 0.5
+
+    def test_empty_transcript_still_scores_velocity(self):
+        import discover
+        t, p = discover.predict_clip_potential("", duration=600, view_count=100000, age_hours=12)
+        assert t == 0.0
+        # With zero transcript but strong velocity + duration fit, predicted is nonzero
+        assert p > 0.2
+
+    def test_duration_fit_sweet_spot(self):
+        import discover
+        _, p_good = discover.predict_clip_potential("", duration=400, view_count=0, age_hours=9999)
+        _, p_bad = discover.predict_clip_potential("", duration=5, view_count=0, age_hours=9999)
+        assert p_good > p_bad
+
+
+class TestDiscoveryEnrichCLI:
+    def test_enrich_mode_requires_video_url(self):
+        result = run_script("discover.py", ["--mode", "enrich"])
+        assert result.returncode != 0
+
+
+class TestShortsDetection:
+    def test_shorts_url_pattern(self):
+        import discover
+        assert discover.is_short({"url": "https://www.youtube.com/shorts/abc12345678"}) is True
+        assert discover.is_short({"url": "https://www.youtube.com/watch?v=abc12345678"}) is False
+
+    def test_short_duration_under_60s(self):
+        import discover
+        assert discover.is_short({"url": "https://youtube.com/watch?v=x", "duration": 45}) is True
+        assert discover.is_short({"url": "https://youtube.com/watch?v=x", "duration": 60}) is True
+        assert discover.is_short({"url": "https://youtube.com/watch?v=x", "duration": 61}) is False
+
+    def test_missing_or_zero_duration_is_not_short(self):
+        import discover
+        assert discover.is_short({"url": "https://youtube.com/watch?v=x", "duration": 0}) is False
+        assert discover.is_short({"url": "https://youtube.com/watch?v=x"}) is False
+
+    def test_string_duration_parsed(self):
+        import discover
+        assert discover.is_short({"url": "", "duration": "30"}) is True
+        assert discover.is_short({"url": "", "duration": "120"}) is False

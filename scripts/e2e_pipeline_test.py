@@ -359,5 +359,123 @@ class TestFullPipelineIntegration(unittest.TestCase):
         print(f"  Top clip: score={top['finalScore']:.4f} tier={top['tier']}")
 
 
+class TestFeaturesPackageImports(unittest.TestCase):
+    """P3.5-A verification: every features/ submodule must import cleanly."""
+
+    def _venv_import(self, module):
+        r = run_cmd([
+            VENV_PYTHON, "-c",
+            f"import sys; sys.path.insert(0, r'{SCRIPTS_DIR}'); import {module}; print('ok')",
+        ])
+        return r
+
+    def test_features_constants_importable(self):
+        r = self._venv_import("features.constants")
+        self.assertIn("ok", r.stdout, f"constants import failed: {r.stderr}")
+
+    def test_features_text_importable(self):
+        r = self._venv_import("features.text")
+        self.assertIn("ok", r.stdout, f"text import failed: {r.stderr}")
+
+    def test_features_audio_importable(self):
+        r = self._venv_import("features.audio")
+        self.assertIn("ok", r.stdout, f"audio import failed: {r.stderr}")
+
+    def test_features_visual_importable(self):
+        r = self._venv_import("features.visual")
+        self.assertIn("ok", r.stdout, f"visual import failed: {r.stderr}")
+
+    def test_features_context_importable(self):
+        r = self._venv_import("features.context")
+        self.assertIn("ok", r.stdout, f"context import failed: {r.stderr}")
+
+    def test_features_supervised_importable(self):
+        r = self._venv_import("features.supervised")
+        self.assertIn("ok", r.stdout, f"supervised import failed: {r.stderr}")
+
+
+class TestP3_5B_NewFeatures(unittest.TestCase):
+    """P3.5-B verification: score output must include motion + onsetDensity,
+    and the TF-IDF corpus loader must return None when no corpus is populated."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.segments_path = os.path.join(cls.tmpdir, "segments.json")
+        with open(cls.segments_path, "w") as f:
+            json.dump({
+                "videoId": "p35b",
+                "segments": [
+                    {"index": 0, "startTime": 0.0, "endTime": 20.0, "duration": 20.0,
+                     "text": "Rahasia penting! Kenapa ternyata bisa begitu?",
+                     "reason": "hook"},
+                ],
+            }, f)
+        cls.video_path = os.path.join(cls.tmpdir, "stub.mp4")
+        with open(cls.video_path, "wb") as f:
+            f.write(b"stub")
+
+        cls.result = run_cmd([
+            VENV_PYTHON,
+            os.path.join(SCRIPTS_DIR, "score.py"),
+            "--segments", cls.segments_path,
+            "--video", cls.video_path,
+        ])
+
+    def test_score_runs_without_mediapipe_or_cuda(self):
+        self.assertEqual(self.result.returncode, 0,
+                         f"score.py failed on a stub video: {self.result.stderr}")
+
+    def test_scores_dict_contains_motion(self):
+        with open(self.segments_path) as f:
+            data = json.load(f)
+        seg = data["scoredSegments"][0]
+        self.assertIn("motion", seg["scores"])
+        self.assertGreaterEqual(seg["scores"]["motion"], 0.0)
+        self.assertLessEqual(seg["scores"]["motion"], 1.0)
+
+    def test_scores_dict_contains_onset_density(self):
+        with open(self.segments_path) as f:
+            data = json.load(f)
+        seg = data["scoredSegments"][0]
+        self.assertIn("onsetDensity", seg["scores"])
+        self.assertGreaterEqual(seg["scores"]["onsetDensity"], 0.0)
+        self.assertLessEqual(seg["scores"]["onsetDensity"], 1.0)
+
+
+class TestP3_5C_SupervisedGuard(unittest.TestCase):
+    """P3.5-C verification: train_scorer.evaluate refuses to write a model
+    when fewer than 200 labeled rows exist."""
+
+    def test_train_scorer_refuses_below_threshold(self):
+        result = run_cmd([
+            VENV_PYTHON, "-c",
+            f"import sys; sys.path.insert(0, r'{SCRIPTS_DIR}'); "
+            "from train_scorer import evaluate; "
+            "print(evaluate([{'features': {'a': 0.1}, 'actual_viral_score': 0.5}] * 5, "
+            "min_rows=200, write_model=True)['status'])",
+        ])
+        self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
+        self.assertIn("insufficient_data", result.stdout)
+
+
+class TestP0_NvencProbe(unittest.TestCase):
+    """P0 verification: render.py exposes a cached NVENC probe and the
+    command builder puts -ss/-to before -i (fast seek) + format=yuv420p in vf."""
+
+    def test_render_build_cmd_shape(self):
+        result = run_cmd([
+            VENV_PYTHON, "-c",
+            f"import sys; sys.path.insert(0, r'{SCRIPTS_DIR}'); "
+            "import render; "
+            "cmd = render._build_render_cmd('ffmpeg', '/tmp/x.mp4', 1.0, 2.0, '/tmp/y.mp4', use_nvenc=False); "
+            "i = cmd.index('-i'); ss = cmd.index('-ss'); to = cmd.index('-to'); "
+            "vf = cmd[cmd.index('-vf')+1]; "
+            "print('OK' if ss < i and to < i and 'format=yuv420p' in vf else 'BAD')",
+        ])
+        self.assertIn("OK", result.stdout,
+                      f"render command shape regression: {result.stdout} {result.stderr}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

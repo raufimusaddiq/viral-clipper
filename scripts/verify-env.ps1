@@ -2,17 +2,21 @@
 .SYNOPSIS
     Verify all dependencies for Viral Clipper
 .DESCRIPTION
-    Checks Docker, GPU passthrough, Node.js, Python venv, ffmpeg, yt-dlp
-    Returns exit code 0 if all OK, 1 if missing deps
+    Checks Docker, GPU passthrough, Node.js, Python venv, ffmpeg, and the
+    AI-pipeline Python packages. Returns exit code 0 if required checks pass,
+    1 if required items missing. Optional deps (yt-dlp on host, lightgbm for
+    scorer retraining) print a warning but don't fail the check.
 #>
 
-$ErrorActionPreference = "SilentlyContinue"
+$ErrorActionPreference = "Continue"
+Set-Location ($PSScriptRoot | Split-Path)
 
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 
-function Check($name, $cmd, $args) {
-    $result = Get-Command $cmd -ErrorAction SilentlyContinue
-    if ($result) {
+$VENV_PY = "ai-pipeline\.venv\Scripts\python.exe"
+
+function Check-Required($name, $cmd) {
+    if (Get-Command $cmd -ErrorAction SilentlyContinue) {
         Write-Host "  [OK] $name" -ForegroundColor Green
         return $true
     } else {
@@ -21,17 +25,38 @@ function Check($name, $cmd, $args) {
     }
 }
 
-function CheckDockerGPU {
+function Check-Optional($name, $cmd, $hint) {
+    if (Get-Command $cmd -ErrorAction SilentlyContinue) {
+        Write-Host "  [OK] $name" -ForegroundColor Green
+    } else {
+        Write-Host "  [OPTIONAL] $name not on host ($hint)" -ForegroundColor DarkYellow
+    }
+}
+
+function Check-VenvImport($module, $required, $hint) {
+    $out = & $VENV_PY -c "import $module; print('ok')" 2>&1
+    if ($out -match "ok") {
+        Write-Host "  [OK] venv: $module" -ForegroundColor Green
+        return $true
+    }
+    if ($required) {
+        Write-Host "  [MISSING] venv: $module" -ForegroundColor Red
+        return $false
+    }
+    Write-Host "  [OPTIONAL] venv: $module not installed ($hint)" -ForegroundColor DarkYellow
+    return $true
+}
+
+function Check-DockerGPU {
     Write-Host "  Checking Docker GPU passthrough..." -NoNewline
-    $result = docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi 2>&1
+    $null = docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Host " OK" -ForegroundColor Green
         return $true
-    } else {
-        Write-Host " FAILED" -ForegroundColor Red
-        Write-Host "    GPU not available in Docker. Install NVIDIA Container Toolkit." -ForegroundColor Yellow
-        return $false
     }
+    Write-Host " FAILED" -ForegroundColor Red
+    Write-Host "    GPU not available in Docker. Install NVIDIA Container Toolkit." -ForegroundColor Yellow
+    return $false
 }
 
 Write-Host "`n=== Viral Clipper Environment Check ===" -ForegroundColor Cyan
@@ -40,39 +65,35 @@ Write-Host ""
 $allOk = $true
 
 Write-Host "--- Core Dependencies ---" -ForegroundColor Yellow
-$allOk = $allOk -and (Check "Docker" "docker")
-$allOk = $allOk -and (Check "Node.js" "node")
-$allOk = $allOk -and (Check "npm" "npm")
-$allOk = $allOk -and (Check "Python" "python")
-$allOk = $allOk -and (Check "ffmpeg" "ffmpeg")
-$allOk = $allOk -and (Check "yt-dlp" "yt-dlp")
+$allOk = $allOk -and (Check-Required "Docker" "docker")
+$allOk = $allOk -and (Check-Required "Node.js" "node")
+$allOk = $allOk -and (Check-Required "npm" "npm")
+$allOk = $allOk -and (Check-Required "Python" "python")
+$allOk = $allOk -and (Check-Required "ffmpeg" "ffmpeg")
+# yt-dlp is bundled inside the Docker image via requirements.txt (P4 change);
+# only needed on host for local testing outside Docker.
+Check-Optional "yt-dlp on host" "yt-dlp" "bundled inside Docker; install on host only for native dev"
 
 Write-Host ""
 Write-Host "--- Python AI Pipeline ---" -ForegroundColor Yellow
-if (Test-Path "ai-pipeline\.venv\Scripts\python.exe") {
+if (Test-Path $VENV_PY) {
     Write-Host "  [OK] Python venv" -ForegroundColor Green
-    $whisper = & "ai-pipeline\.venv\Scripts\python.exe" -c "import faster_whisper; print('ok')" 2>&1
-    if ($whisper -match "ok") {
-        Write-Host "  [OK] faster-whisper" -ForegroundColor Green
-    } else {
-        Write-Host "  [MISSING] faster-whisper in venv" -ForegroundColor Red
-        $allOk = $false
-    }
-    $cv2 = & "ai-pipeline\.venv\Scripts\python.exe" -c "import cv2; print('ok')" 2>&1
-    if ($cv2 -match "ok") {
-        Write-Host "  [OK] opencv" -ForegroundColor Green
-    } else {
-        Write-Host "  [MISSING] opencv in venv" -ForegroundColor Red
-        $allOk = $false
-    }
+    $allOk = $allOk -and (Check-VenvImport "faster_whisper" $true "")
+    $allOk = $allOk -and (Check-VenvImport "cv2" $true "")
+    $allOk = $allOk -and (Check-VenvImport "numpy" $true "")
+    # Supervised-scorer deps — only used by train_scorer.py.
+    Check-VenvImport "lightgbm" $false "needed only for train_scorer.py (P3.5-C)" | Out-Null
+    Check-VenvImport "sklearn" $false "needed only for train_scorer.py (P3.5-C)" | Out-Null
 } else {
-    Write-Host "  [MISSING] Python venv (run: python -m venv ai-pipeline\.venv)" -ForegroundColor Red
+    Write-Host "  [MISSING] Python venv at $VENV_PY" -ForegroundColor Red
+    Write-Host "            Run: python -m venv ai-pipeline\.venv" -ForegroundColor DarkGray
+    Write-Host "                 .\ai-pipeline\.venv\Scripts\pip install -r ai-pipeline\requirements.txt" -ForegroundColor DarkGray
     $allOk = $false
 }
 
 Write-Host ""
 Write-Host "--- Docker GPU ---" -ForegroundColor Yellow
-$allOk = $allOk -and (CheckDockerGPU)
+$allOk = $allOk -and (Check-DockerGPU)
 
 Write-Host ""
 Write-Host "--- Project Files ---" -ForegroundColor Yellow
@@ -84,7 +105,10 @@ $files = @(
     @("backend\src\main\resources\schema.sql", "Database schema"),
     @("ai-pipeline\transcribe.py", "Transcribe script"),
     @("ai-pipeline\segment.py", "Segment script"),
-    @("ai-pipeline\score.py", "Score script")
+    @("ai-pipeline\score.py", "Score script"),
+    @("ai-pipeline\features\__init__.py", "features/ package (P3.5-A)"),
+    @("ai-pipeline\train_scorer.py", "Supervised trainer (P3.5-C)"),
+    @("ai-pipeline\weights.json", "Scoring weights (v3)")
 )
 foreach ($f in $files) {
     if (Test-Path $f[0]) {
@@ -97,13 +121,17 @@ foreach ($f in $files) {
 
 Write-Host ""
 Write-Host "--- Unit Tests ---" -ForegroundColor Yellow
-$pytestResult = & python -m pytest ai-pipeline/tests/ -q --tb=no 2>&1
-if ($LASTEXITCODE -eq 0) {
-    $line = ($pytestResult | Select-String "passed").Line
-    Write-Host "  [OK] Python tests: $line" -ForegroundColor Green
+if (Test-Path $VENV_PY) {
+    $pytestResult = & $VENV_PY -m pytest ai-pipeline/tests/ -q --tb=no 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        $line = ($pytestResult | Select-String "passed").Line
+        Write-Host "  [OK] Python tests: $line" -ForegroundColor Green
+    } else {
+        Write-Host "  [FAIL] Python tests failing" -ForegroundColor Red
+        $allOk = $false
+    }
 } else {
-    Write-Host "  [FAIL] Python tests failing" -ForegroundColor Red
-    $allOk = $false
+    Write-Host "  [SKIP] venv missing, can't run pytest" -ForegroundColor DarkYellow
 }
 
 Write-Host ""

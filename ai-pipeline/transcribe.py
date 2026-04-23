@@ -7,18 +7,32 @@ import sys
 import os
 
 def main():
+    # Env overrides let the user A/B models without touching Java code. CLI args
+    # still win when explicitly passed.
+    default_model = os.environ.get("WHISPER_MODEL", "large-v3-turbo")
+    default_device = os.environ.get("WHISPER_DEVICE", "cuda")
+    default_compute = os.environ.get("WHISPER_COMPUTE_TYPE", "")
+
     parser = argparse.ArgumentParser(description="Transcribe audio file")
     parser.add_argument("--audio", required=True, help="Path to WAV audio file")
     parser.add_argument("--output", help="Path to write transcript JSON")
     parser.add_argument("--language", default="id", help="Language code")
-    parser.add_argument("--model", default="medium", help="Whisper model size")
-    parser.add_argument("--device", default="cuda", help="Device: cuda or cpu")
+    parser.add_argument("--model", default=default_model, help="Whisper model size")
+    parser.add_argument("--device", default=default_device, help="Device: cuda or cpu")
+    parser.add_argument(
+        "--compute-type", default=default_compute,
+        help="faster-whisper compute_type (e.g. float16, int8_float16, int8). "
+             "Empty = auto (float16 on cuda, int8 on cpu).",
+    )
     args = parser.parse_args()
 
     try:
         from faster_whisper import WhisperModel
 
-        compute_type = "float16" if args.device == "cuda" else "int8"
+        if args.compute_type:
+            compute_type = args.compute_type
+        else:
+            compute_type = "float16" if args.device == "cuda" else "int8"
         model = WhisperModel(args.model, device=args.device, compute_type=compute_type)
 
         segments_gen, info = model.transcribe(

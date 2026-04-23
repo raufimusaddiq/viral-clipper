@@ -45,47 +45,50 @@ public class FeedbackService {
         this.objectMapper = objectMapper;
     }
 
-    public void saveFeedbackSnapshot(Clip clip, ClipScore clipScore) {
+    /** Create or update a clip_feedback row with real TikTok metrics.
+     *
+     * The caller must supply {@code postedAtIso} — a past ISO-8601 timestamp
+     * when the clip was uploaded to TikTok. The viral score is normalized by
+     * time-on-platform (views/day velocity, not raw totals), because a clip
+     * with 10k views in 2 hours is very different from 10k views in 2 months.
+     *
+     * We snapshot the current scoring feature vector at submit time so the
+     * supervised trainer can learn (feature_vector → actual_viral_score)
+     * pairs later without needing to recompute features on stale clips.
+     */
+    public ClipFeedback submitTikTokMetrics(
+            String clipId, int views, int likes, int comments, int shares, int saves,
+            String postedAtIso) {
+
+        java.time.Instant postedAt;
         try {
-            Map<String, Object> features = new HashMap<>();
-            features.put("hookStrength", clipScore.getHookStrength());
-            features.put("keywordTrigger", clipScore.getKeywordTrigger());
-            features.put("novelty", clipScore.getNovelty());
-            features.put("clarity", clipScore.getClarity());
-            features.put("emotionalEnergy", clipScore.getEmotionalEnergy());
-            features.put("textSentiment", clipScore.getTextSentiment());
-            features.put("pauseStructure", clipScore.getPauseStructure());
-            features.put("facePresence", clipScore.getFacePresence());
-            features.put("sceneChange", clipScore.getSceneChange());
-            features.put("topicFit", clipScore.getTopicFit());
-            features.put("historyScore", clipScore.getHistoryScore());
-
-            ClipFeedback fb = new ClipFeedback();
-            fb.setId(UUID.randomUUID().toString());
-            fb.setClipId(clip.getId());
-            fb.setVideoId(clip.getVideoId());
-            fb.setFeatures(objectMapper.writeValueAsString(features));
-            fb.setPredictedScore(clip.getScore());
-            fb.setPredictedTier(clip.getTier());
-            fb.setCreatedAt(java.time.Instant.now().toString());
-            feedbackRepository.save(fb);
+            postedAt = java.time.Instant.parse(postedAtIso);
         } catch (Exception e) {
-            log.warn("Failed to save feedback snapshot for clip {}: {}", clip.getId(), e.getMessage());
+            throw new IllegalArgumentException(
+                    "postedAt must be ISO-8601 (e.g. 2026-04-22T10:00:00Z); got: " + postedAtIso);
         }
-    }
+        java.time.Instant now = java.time.Instant.now();
+        if (postedAt.isAfter(now)) {
+            throw new IllegalArgumentException("postedAt is in the future: " + postedAtIso);
+        }
+        double hoursSincePost = Math.max(
+                (now.toEpochMilli() - postedAt.toEpochMilli()) / 3_600_000.0, 0.1);
 
-    public ClipFeedback submitTikTokMetrics(String clipId, int views, int likes, int comments, int shares, int saves) {
         ClipFeedback fb = feedbackRepository.findByClipId(clipId)
                 .orElseGet(() -> {
                     ClipFeedback newFb = new ClipFeedback();
                     newFb.setId(UUID.randomUUID().toString());
                     newFb.setClipId(clipId);
-                    Clip clip = clipRepository.findById(clipId).orElseThrow();
+                    Clip clip = clipRepository.findById(clipId)
+                            .orElseThrow(() -> new IllegalArgumentException("Clip not found: " + clipId));
                     newFb.setVideoId(clip.getVideoId());
-                    newFb.setFeatures("{}");
-                    newFb.setPredictedScore(0.0);
-                    newFb.setPredictedTier("UNKNOWN");
-                    newFb.setCreatedAt(java.time.Instant.now().toString());
+                    newFb.setPredictedScore(clip.getScore() != null ? clip.getScore() : 0.0);
+                    newFb.setPredictedTier(clip.getTier() != null ? clip.getTier() : "UNKNOWN");
+                    newFb.setCreatedAt(now.toString());
+                    // Snapshot the feature vector at submit time so we capture
+                    // what the scorer saw for this clip. If the ClipScore has
+                    // been updated since, we record the current values.
+                    newFb.setFeatures(serializeFeatures(clipId));
                     return newFb;
                 });
 
@@ -94,8 +97,8 @@ public class FeedbackService {
         fb.setTiktokComments(comments);
         fb.setTiktokShares(shares);
         fb.setTiktokSaves(saves);
-        fb.setPostedAt(java.time.Instant.now().toString());
-        fb.setLastChecked(java.time.Instant.now().toString());
+        fb.setPostedAt(postedAtIso);
+        fb.setLastChecked(now.toString());
 
         try {
             List<String> args = List.of(
@@ -104,7 +107,8 @@ public class FeedbackService {
                     "--likes", String.valueOf(likes),
                     "--comments", String.valueOf(comments),
                     "--shares", String.valueOf(shares),
-                    "--saves", String.valueOf(saves)
+                    "--saves", String.valueOf(saves),
+                    "--hours-since-post", String.valueOf(hoursSincePost)
             );
             JsonNode result = pythonRunner.runScript("feedback.py", args);
             fb.setActualViralScore(result.path("viralScore").asDouble());
@@ -113,6 +117,28 @@ public class FeedbackService {
         }
 
         return feedbackRepository.save(fb);
+    }
+
+    private String serializeFeatures(String clipId) {
+        try {
+            ClipScore cs = clipScoreRepository.findByClipId(clipId);
+            if (cs == null) return "{}";
+            Map<String, Object> f = new HashMap<>();
+            f.put("hookStrength", cs.getHookStrength());
+            f.put("keywordTrigger", cs.getKeywordTrigger());
+            f.put("novelty", cs.getNovelty());
+            f.put("clarity", cs.getClarity());
+            f.put("emotionalEnergy", cs.getEmotionalEnergy());
+            f.put("textSentiment", cs.getTextSentiment());
+            f.put("pauseStructure", cs.getPauseStructure());
+            f.put("facePresence", cs.getFacePresence());
+            f.put("sceneChange", cs.getSceneChange());
+            f.put("topicFit", cs.getTopicFit());
+            f.put("historyScore", cs.getHistoryScore());
+            return objectMapper.writeValueAsString(f);
+        } catch (Exception e) {
+            return "{}";
+        }
     }
 
     public Map<String, Object> triggerTraining() throws Exception {
