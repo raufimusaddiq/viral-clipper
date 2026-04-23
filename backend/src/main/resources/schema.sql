@@ -162,3 +162,32 @@ ALTER TABLE discovered_video ADD COLUMN speech_density_wpm REAL;
 ALTER TABLE discovered_video ADD COLUMN is_likely_clipped INTEGER DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_discovered_channel ON discovered_video(channel_id);
 CREATE INDEX IF NOT EXISTS idx_discovered_content_type ON discovered_video(content_type);
+
+-- Discovery v2 Phase 2: tracked channels. trust_score is an EMA updated by
+-- the daily trust-feedback job (Phase 3) from clip_feedback.actual_viral_score;
+-- seeded at 0.5 for new channels. poll_cadence_hours is adjusted by trust_score
+-- tier: 6h (high), 24h (medium), 168h (low). Channels flagged is_likely_clipper
+-- or with avg_duration_sec < 900 are set to REJECTED (row preserved for dedup).
+CREATE TABLE IF NOT EXISTS discovery_channel (
+    id TEXT PRIMARY KEY,
+    youtube_channel_id TEXT NOT NULL,
+    channel_name TEXT NOT NULL,
+    channel_url TEXT NOT NULL,
+    primary_category TEXT,
+    avg_duration_sec INTEGER,
+    median_view_count BIGINT,
+    uploads_per_week REAL,
+    subscriber_count BIGINT,
+    is_likely_clipper_channel INTEGER DEFAULT 0,
+    trust_score REAL DEFAULT 0.5,
+    trust_samples INTEGER DEFAULT 0,
+    poll_cadence_hours INTEGER DEFAULT 24,
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    first_seen_at TEXT NOT NULL,
+    last_crawled_at TEXT,
+    last_profile_refresh_at TEXT,
+    UNIQUE(youtube_channel_id)
+);
+CREATE INDEX IF NOT EXISTS idx_dc_status_poll ON discovery_channel(status, last_crawled_at);
+CREATE INDEX IF NOT EXISTS idx_dc_trust ON discovery_channel(trust_score DESC);
+CREATE INDEX IF NOT EXISTS idx_dc_category ON discovery_channel(primary_category);

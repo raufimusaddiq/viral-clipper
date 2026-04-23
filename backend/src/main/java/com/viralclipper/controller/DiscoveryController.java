@@ -1,8 +1,10 @@
 package com.viralclipper.controller;
 
 import com.viralclipper.model.DiscoveredVideo;
+import com.viralclipper.model.DiscoveryChannel;
 import com.viralclipper.model.Job;
 import com.viralclipper.model.Video;
+import com.viralclipper.service.ChannelCrawlerService;
 import com.viralclipper.service.DiscoveryService;
 import com.viralclipper.service.JobService;
 import com.viralclipper.service.VideoService;
@@ -18,13 +20,16 @@ public class DiscoveryController {
     private final DiscoveryService discoveryService;
     private final VideoService videoService;
     private final JobService jobService;
+    private final ChannelCrawlerService channelCrawler;
 
     public DiscoveryController(DiscoveryService discoveryService,
                                VideoService videoService,
-                               JobService jobService) {
+                               JobService jobService,
+                               ChannelCrawlerService channelCrawler) {
         this.discoveryService = discoveryService;
         this.videoService = videoService;
         this.jobService = jobService;
+        this.channelCrawler = channelCrawler;
     }
 
     @PostMapping("/search")
@@ -118,6 +123,74 @@ public class DiscoveryController {
         }
         return ResponseEntity.ok(Map.of("status", "ok",
                 "data", Map.of("started", started, "failed", failed)));
+    }
+
+    // -- channels (Phase 2) --
+
+    @GetMapping("/channels")
+    public ResponseEntity<Map<String, Object>> channels(@RequestParam(required = false) String status) {
+        List<DiscoveryChannel> rows = (status == null || status.isBlank())
+                ? channelCrawler.listActive()
+                : channelCrawler.listByStatus(status.toUpperCase());
+
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (DiscoveryChannel c : rows) out.add(channelToMap(c));
+        return ResponseEntity.ok(Map.of("status", "ok",
+                "data", Map.of("count", out.size(), "channels", out)));
+    }
+
+    @PostMapping("/channels/reseed")
+    public ResponseEntity<Map<String, Object>> reseed() {
+        return run(() -> {
+            ChannelCrawlerService.SeedResult r = channelCrawler.runCategorySeed();
+            return Map.of(
+                    "upserted", r.upserted(),
+                    "profiled", r.profiled(),
+                    "rejected", r.rejected(),
+                    "alreadyKnown", r.alreadyKnown()
+            );
+        });
+    }
+
+    @PostMapping("/channels/{id}/refresh")
+    public ResponseEntity<Map<String, Object>> refreshChannel(@PathVariable String id) {
+        return run(() -> {
+            boolean rejected = channelCrawler.refreshProfile(id);
+            return Map.of("channelId", id, "rejected", rejected);
+        });
+    }
+
+    @PostMapping("/channels/{id}/status")
+    public ResponseEntity<Map<String, Object>> channelStatus(@PathVariable String id,
+                                                             @RequestBody Map<String, Object> body) {
+        String status = (String) body.getOrDefault("status", "");
+        if (status.isBlank()) return badRequest("status is required");
+        return channelCrawler.setStatus(id, status)
+                .map(c -> ResponseEntity.ok(Map.of("status", "ok", "data", channelToMap(c))))
+                .orElseGet(() -> ResponseEntity.status(404).body(Map.of("status", "error", "error", "not found")));
+    }
+
+    private static Map<String, Object> channelToMap(DiscoveryChannel c) {
+        Map<String, Object> m = new HashMap<>();
+        m.put("id", c.getId());
+        m.put("youtubeChannelId", c.getYoutubeChannelId());
+        m.put("channelName", c.getChannelName());
+        m.put("channelUrl", c.getChannelUrl());
+        m.put("primaryCategory", c.getPrimaryCategory());
+        m.put("avgDurationSec", c.getAvgDurationSec());
+        m.put("medianViewCount", c.getMedianViewCount());
+        m.put("uploadsPerWeek", c.getUploadsPerWeek());
+        m.put("subscriberCount", c.getSubscriberCount());
+        m.put("isLikelyClipperChannel",
+                c.getIsLikelyClipperChannel() != null && c.getIsLikelyClipperChannel() == 1);
+        m.put("trustScore", c.getTrustScore());
+        m.put("trustSamples", c.getTrustSamples());
+        m.put("pollCadenceHours", c.getPollCadenceHours());
+        m.put("status", c.getStatus());
+        m.put("firstSeenAt", c.getFirstSeenAt());
+        m.put("lastCrawledAt", c.getLastCrawledAt());
+        m.put("lastProfileRefreshAt", c.getLastProfileRefreshAt());
+        return m;
     }
 
     // -- helpers --

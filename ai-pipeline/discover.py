@@ -220,7 +220,7 @@ def quick_relevance_score(video_meta, keywords=None):
     score += duration_fit_score(duration) * 0.25
 
     view_count = video_meta.get("viewCount") or video_meta.get("view_count") or 0
-    age_hours = video_meta.get("age_hours", 999)
+    age_hours = video_meta.get("age_hours", 99999)
     if isinstance(age_hours, (int, float)) and age_hours < 720 and view_count > 0:
         vph = view_count / max(age_hours, 1)
         if vph > 1000:
@@ -252,7 +252,11 @@ def normalize_video(entry):
             view_count = None
 
     upload_date = entry.get("upload_date") or ""
-    age_hours = 999
+    # 99999 = "unknown age" sentinel (beyond any realistic filter threshold).
+    # --flat-playlist strips upload_date on most channel/hashtag feeds; in those
+    # cases a row whose real age is 6 years old would show as 99999 rather than
+    # masquerade as 999 hours (~41 days) and sneak past the recency filter.
+    age_hours = 99999
     if upload_date and len(upload_date) >= 8:
         try:
             upload_dt = datetime.strptime(upload_date[:8], "%Y%m%d").replace(
@@ -285,7 +289,7 @@ def normalize_video(entry):
 
 
 def discover_search(query, max_results=20, ytdlp_path="yt-dlp", min_duration=0, max_duration=0,
-                    dateafter=None, recent_only=False, max_age_days=0, timeout=180,
+                    dateafter=None, recent_only=False, max_age_days=90, timeout=180,
                     exclude_shorts=True):
     """Search yt-dlp for videos matching ``query``.
 
@@ -477,18 +481,24 @@ def discover_trending(max_results=20, ytdlp_path="yt-dlp", region="ID",
 
 
 def discover_channel(channel_url, max_results=20, ytdlp_path="yt-dlp", min_duration=0, max_duration=0,
-                     exclude_shorts=True):
+                     exclude_shorts=True, max_age_days=90):
+    """Fetch a channel's recent uploads.
+
+    Uses ``--flat-playlist`` (fast, strips upload_date on channel feeds). To
+    enforce ``max_age_days``, we also apply a Python-side filter via
+    ``age_hours`` which ``normalize_video`` computes when present — and pull
+    more than ``max_results`` initially so after age filtering we still have
+    enough rows.
+    """
     videos_url = channel_url.rstrip("/") + "/videos"
+    fetch_count = max_results * 3 if max_age_days else max_results
+    args_tail = ["--flat-playlist", "--dump-json", "--skip-download", "--playlist-end", str(fetch_count)]
     stdout, stderr, rc = run_ytdlp(
-        [videos_url, "--flat-playlist", "--dump-json", "--skip-download", "--playlist-end", str(max_results)],
-        ytdlp_path=ytdlp_path,
-        timeout=180,
+        [videos_url] + args_tail, ytdlp_path=ytdlp_path, timeout=180,
     )
     if rc != 0:
         stdout2, stderr2, rc2 = run_ytdlp(
-            [channel_url, "--flat-playlist", "--dump-json", "--skip-download", "--playlist-end", str(max_results)],
-            ytdlp_path=ytdlp_path,
-            timeout=180,
+            [channel_url] + args_tail, ytdlp_path=ytdlp_path, timeout=180,
         )
         if rc2 != 0:
             raise RuntimeError(f"yt-dlp channel failed: {stderr2}")
@@ -510,13 +520,21 @@ def discover_channel(channel_url, max_results=20, ytdlp_path="yt-dlp", min_durat
                 continue
             if max_duration and vid["duration"] > max_duration:
                 continue
+            # Age filter. Flat-playlist strips upload_date for most channel
+            # entries, so age_hours defaults to 999 (unknown). Only reject
+            # rows where we KNOW the age is beyond the cutoff — missing dates
+            # are let through rather than silently discarded.
+            if max_age_days:
+                age_h = vid.get("age_hours", 9999)
+                if isinstance(age_h, (int, float)) and age_h < 9999 and age_h > max_age_days * 24:
+                    continue
             vid["relevanceScore"] = quick_relevance_score(vid)
             videos.append(vid)
         except json.JSONDecodeError:
             continue
 
     videos.sort(key=lambda v: v["relevanceScore"], reverse=True)
-    return videos
+    return videos[:max_results]
 
 
 def sample_transcript(video_url, ytdlp_path="yt-dlp", lang="id", max_chars=2000):

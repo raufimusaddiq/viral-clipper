@@ -36,7 +36,8 @@ public class PythonRunner {
             "variation.py", 10,
             "analytics.py", 5,
             "segment.py", 2,
-            "discover.py", 5
+            "discover.py", 5,
+            "channel_crawler.py", 10
     );
     private static final int DEFAULT_TIMEOUT_MINUTES = 15;
     private static final int STDERR_RING_BYTES = 64 * 1024;

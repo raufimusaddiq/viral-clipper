@@ -27,6 +27,12 @@ public class DiscoveryService {
     private static final int ENRICHMENT_CONCURRENCY = 3;
     private static final int ENRICHMENT_TOP_N = 10;
 
+    // Default age cap for the NEW+QUEUED candidates view. Keeps 6–7-yr-old
+    // videos (and stale rows from earlier pre-filter runs) out of the default
+    // Discover tab without deleting them. Specific status filters bypass this
+    // (IMPORTED/SKIPPED remain visible regardless of age).
+    private static final double DEFAULT_MAX_AGE_HOURS = 90.0 * 24.0;
+
     private final PythonRunner pythonRunner;
     private final AppConfig appConfig;
     private final DiscoveredVideoRepository discoveredRepo;
@@ -109,10 +115,10 @@ public class DiscoveryService {
         return buildResponse("channel", channelUrl, persisted);
     }
 
-    /** List stored candidates. status=null returns NEW+QUEUED ranked by predicted_score. */
+    /** List stored candidates. status=null returns NEW+QUEUED (age-filtered) ranked by predicted_score. */
     public List<DiscoveredVideo> listCandidates(String status) {
         if (status == null || status.isBlank()) {
-            return discoveredRepo.findActiveRanked();
+            return discoveredRepo.findActiveRankedRecent(DEFAULT_MAX_AGE_HOURS);
         }
         return discoveredRepo.findByStatusOrderByPredictedScoreDescRelevanceScoreDesc(status.toUpperCase());
     }
