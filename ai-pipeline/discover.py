@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""YouTube video discovery via yt-dlp — search, trending, channel monitoring."""
+"""YouTube video discovery via yt-dlp — search, trending, channel monitoring, enrichment.
+
+Discovery modes:
+- ``search`` / ``trending`` / ``channel``: yt-dlp metadata lookup with a cheap
+  title+duration+velocity heuristic (``quick_relevance_score``).
+- ``enrich``: given one video's URL + metadata, pull YouTube auto-captions and
+  re-use the pipeline's ``features.text`` scorer on a transcript sample to
+  produce a ``predictedScore`` — the real "how clippable is this?" signal.
+"""
 
 import argparse
 import json
@@ -7,6 +15,9 @@ import subprocess
 import sys
 import os
 import re
+import glob
+import tempfile
+import shutil
 from datetime import datetime, timezone
 
 
@@ -34,15 +45,26 @@ SEARCH_QUERIES = {
         "kontroversi indonesia",
         "curhat viral indonesia",
     ],
-    "trending_id": [
-        "viral clip indonesia lucu kocak",
+    # Secondary source for trending: niche content types we can clip. Used to
+    # supplement hashtag feeds, not replace them.
+    "trending_niche_id": [
         "streamer indonesia viral moments",
         "podcast indonesia bahas viral",
-        "gamer indonesia epic moment",
         "influencer indonesia drama viral",
-        "content creator indonesia terbaru viral",
     ],
 }
+
+# Real Indonesian trending signal: YouTube's own hashtag feeds. Curated for
+# viral-clipper fit — breaking news + celebrity + drama + reactions are the
+# categories that actually produce clippable hooks. Ordered roughly by how
+# often they surface new content.
+TRENDING_HASHTAGS_ID = [
+    "viralindonesia",
+    "viral",
+    "beritaviral",
+    "terbaru",
+    "fyp",
+]
 
 
 def run_ytdlp(args, ytdlp_path="yt-dlp", timeout=120):
@@ -162,13 +184,37 @@ def normalize_video(entry):
     }
 
 
-def discover_search(query, max_results=20, ytdlp_path="yt-dlp", min_duration=0, max_duration=0, dateafter=None):
+def discover_search(query, max_results=20, ytdlp_path="yt-dlp", min_duration=0, max_duration=0,
+                    dateafter=None, recent_only=False, max_age_days=0, timeout=180,
+                    exclude_shorts=True):
+    """Search yt-dlp for videos matching ``query``.
+
+    When ``recent_only=True`` or ``max_age_days>0``, drop ``--flat-playlist``
+    so yt-dlp returns full metadata (upload_date, view_count, duration). Flat
+    mode strips those, which is why pre-fix trending surfaced 6-year-old
+    videos: ``age_hours`` defaulted to 999 and the velocity filter ignored it.
+    Also use ``ytsearchdate`` (YouTube sort-by-date) and ``--match-filters``
+    to push the age cutoff to the server so we don't pay for stale results.
+    """
+    # Note: yt-dlp's `ytsearchdate:` prefix isn't available in all versions
+    # (absent in 2026.03.17) — we rely on YouTube's own recency bias plus
+    # --match-filters for a hard server-side cutoff.
     search_term = f"ytsearch{max_results}:{query}"
-    args = [search_term, "--flat-playlist", "--dump-json", "--skip-download"]
+
+    args = [search_term, "--dump-json", "--skip-download"]
+    if recent_only or max_age_days:
+        # Full metadata mode — ~2-3x slower but upload_date is populated.
+        # Without this, --flat-playlist strips upload_date and age_hours
+        # defaults to 999, which means the "is this recent?" filter is a no-op
+        # and trending returns 6-year-old videos with viral-y titles.
+        days = max_age_days or 30
+        args += ["--match-filters", f"upload_date >=(today-{days}days)"]
+    else:
+        args.append("--flat-playlist")
     if dateafter:
         args += ["--dateafter", dateafter]
 
-    stdout, stderr, rc = run_ytdlp(args, ytdlp_path=ytdlp_path, timeout=180)
+    stdout, stderr, rc = run_ytdlp(args, ytdlp_path=ytdlp_path, timeout=timeout)
     if rc != 0:
         raise RuntimeError(f"yt-dlp search failed: {stderr}")
 
@@ -180,9 +226,15 @@ def discover_search(query, max_results=20, ytdlp_path="yt-dlp", min_duration=0, 
         try:
             entry = json.loads(line)
             vid = normalize_video(entry)
+            if exclude_shorts and is_short(vid):
+                continue
             if min_duration and vid["duration"] < min_duration:
                 continue
             if max_duration and vid["duration"] > max_duration:
+                continue
+            # Belt-and-suspenders age filter in case yt-dlp returned something
+            # the --match-filters missed (e.g. missing upload_date).
+            if max_age_days and vid.get("age_hours", 9999) > max_age_days * 24:
                 continue
             vid["relevanceScore"] = quick_relevance_score(vid)
             videos.append(vid)
@@ -193,20 +245,118 @@ def discover_search(query, max_results=20, ytdlp_path="yt-dlp", min_duration=0, 
     return videos
 
 
-def discover_trending(max_results=20, ytdlp_path="yt-dlp", region="ID"):
-    queries = SEARCH_QUERIES.get("trending_id", [
-        "streamer indonesia viral",
-        "podcast indonesia bahas viral",
-        "gamer indonesia epic moment",
-        "influencer indonesia drama viral",
-    ])
-    per_query = max(max_results // len(queries), 5)
+def is_short(entry_or_vid):
+    """Detect a YouTube Short by URL pattern or duration.
+
+    Shorts are already clipped content — not useful as a clipping source. We
+    filter by two signals: the ``/shorts/`` URL fragment (unambiguous) and
+    duration ≤ 60s (the YouTube Short cap). Either one is enough.
+    """
+    url = entry_or_vid.get("url") or entry_or_vid.get("webpage_url") or ""
+    if "/shorts/" in url:
+        return True
+    dur = entry_or_vid.get("duration") or 0
+    try:
+        dur = int(dur)
+    except (TypeError, ValueError):
+        dur = 0
+    return 0 < dur <= 60
+
+
+def discover_hashtag(hashtag, max_results=10, ytdlp_path="yt-dlp",
+                     min_duration=0, max_duration=0, max_age_days=30, timeout=120,
+                     exclude_shorts=True):
+    """Fetch a YouTube hashtag feed (e.g. ``#viralindonesia``).
+
+    YouTube deprecated ``/feed/trending`` in late 2024 — hashtag feeds are the
+    closest thing to a real trending signal yt-dlp can access without an API
+    key. Each feed is YouTube's own ranking of videos under that tag.
+    """
+    url = f"https://www.youtube.com/hashtag/{hashtag}"
+    args = [
+        url, "--dump-json", "--skip-download",
+        "--playlist-end", str(max_results),
+        "--match-filters", f"upload_date >=(today-{max_age_days}days)",
+        "--no-warnings",
+    ]
+    stdout, stderr, rc = run_ytdlp(args, ytdlp_path=ytdlp_path, timeout=timeout)
+    if rc != 0:
+        raise RuntimeError(f"yt-dlp hashtag fetch failed: {stderr}")
+
+    videos = []
+    for line in stdout.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+            vid = normalize_video(entry)
+            if exclude_shorts and is_short(vid):
+                continue
+            if min_duration and vid["duration"] < min_duration:
+                continue
+            if max_duration and vid["duration"] > max_duration:
+                continue
+            # Belt-and-suspenders age filter — --match-filters on playlists
+            # with --skip-download sometimes lets older entries through.
+            if max_age_days and vid.get("age_hours", 9999) > max_age_days * 24:
+                continue
+            vid["relevanceScore"] = quick_relevance_score(vid)
+            videos.append(vid)
+        except json.JSONDecodeError:
+            continue
+    return videos
+
+
+def discover_trending(max_results=20, ytdlp_path="yt-dlp", region="ID",
+                      max_age_days=45, min_duration=90, max_duration=1800):
+    """Pull from YouTube hashtag feeds (real trending) + a small niche-search
+    supplement. Min/max duration drop music videos (usually 2–4 min with
+    topic channel) and full-length uploads (>30 min).
+
+    The 6-keyword search we used before is wrong for "trending" — keyword
+    hits in the title aren't a trending signal. Hashtag feeds are YouTube's
+    own ranking of what's surfacing on that tag right now.
+    """
     seen = set()
     all_videos = []
 
-    for q in queries:
+    # Phase 1 — hashtag feeds in parallel. Non-flat yt-dlp is ~4s per video,
+    # and each hashtag pulls 12+ videos for filtering headroom; sequential
+    # would be ~4 minutes. ThreadPoolExecutor brings it down to ~50s.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    per_tag = max(max_results * 2, 12)
+
+    def fetch(tag):
         try:
-            batch = discover_search(q, per_query, ytdlp_path, dateafter="today-30days")
+            return tag, discover_hashtag(
+                tag, per_tag, ytdlp_path,
+                min_duration=min_duration, max_duration=max_duration,
+                max_age_days=max_age_days, timeout=90,
+            )
+        except RuntimeError:
+            return tag, []
+
+    with ThreadPoolExecutor(max_workers=len(TRENDING_HASHTAGS_ID)) as pool:
+        futures = [pool.submit(fetch, t) for t in TRENDING_HASHTAGS_ID]
+        for fut in as_completed(futures):
+            tag, batch = fut.result()
+            for v in batch:
+                if v["videoId"] not in seen:
+                    seen.add(v["videoId"])
+                    v["sourceHashtag"] = tag
+                    all_videos.append(v)
+
+    # Phase 2 — niche searches that hashtag feeds typically miss (podcasts,
+    # streamer clips). Capped at a few per query so it doesn't dominate.
+    for q in SEARCH_QUERIES.get("trending_niche_id", []):
+        try:
+            batch = discover_search(
+                q, 3, ytdlp_path,
+                recent_only=True, max_age_days=max_age_days,
+                min_duration=min_duration, max_duration=max_duration,
+                timeout=90,
+            )
             for v in batch:
                 if v["videoId"] not in seen:
                     seen.add(v["videoId"])
@@ -218,7 +368,8 @@ def discover_trending(max_results=20, ytdlp_path="yt-dlp", region="ID"):
     return all_videos[:max_results]
 
 
-def discover_channel(channel_url, max_results=20, ytdlp_path="yt-dlp", min_duration=0, max_duration=0):
+def discover_channel(channel_url, max_results=20, ytdlp_path="yt-dlp", min_duration=0, max_duration=0,
+                     exclude_shorts=True):
     videos_url = channel_url.rstrip("/") + "/videos"
     stdout, stderr, rc = run_ytdlp(
         [videos_url, "--flat-playlist", "--dump-json", "--skip-download", "--playlist-end", str(max_results)],
@@ -243,6 +394,8 @@ def discover_channel(channel_url, max_results=20, ytdlp_path="yt-dlp", min_durat
         try:
             entry = json.loads(line)
             vid = normalize_video(entry)
+            if exclude_shorts and is_short(vid):
+                continue
             if min_duration and vid["duration"] < min_duration:
                 continue
             if max_duration and vid["duration"] > max_duration:
@@ -256,9 +409,134 @@ def discover_channel(channel_url, max_results=20, ytdlp_path="yt-dlp", min_durat
     return videos
 
 
+def sample_transcript(video_url, ytdlp_path="yt-dlp", lang="id", max_chars=2000):
+    """Fetch YouTube auto-captions and return up to ``max_chars`` of plain text.
+
+    Uses ``--write-auto-subs --skip-download`` — no video bytes, just captions.
+    Tries requested language first, falls back to English, then any available.
+    Returns empty string if no captions exist (common for brand-new uploads).
+    """
+    tmp = tempfile.mkdtemp(prefix="yt_subs_")
+    try:
+        outtmpl = os.path.join(tmp, "%(id)s.%(ext)s")
+        for sub_lang in (lang, "en", "*"):
+            args = [
+                video_url,
+                "--skip-download",
+                "--write-auto-subs",
+                "--write-subs",
+                "--sub-lang", sub_lang,
+                "--sub-format", "vtt",
+                "-o", outtmpl,
+                "--no-warnings",
+            ]
+            stdout, stderr, rc = run_ytdlp(args, ytdlp_path=ytdlp_path, timeout=90)
+            vtts = glob.glob(os.path.join(tmp, "*.vtt"))
+            if vtts:
+                return _vtt_to_text(vtts[0], max_chars)
+        return ""
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _vtt_to_text(vtt_path, max_chars):
+    """Strip VTT timing/cue lines, dedupe rolling-window repetition, cap length."""
+    try:
+        with open(vtt_path, "r", encoding="utf-8", errors="ignore") as f:
+            raw = f.read()
+    except OSError:
+        return ""
+
+    lines = []
+    for ln in raw.splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        if s.startswith(("WEBVTT", "NOTE", "Kind:", "Language:")):
+            continue
+        if "-->" in s:
+            continue
+        if re.match(r"^\d+$", s):
+            continue
+        # Strip inline tags like <c> / <00:00:01.000>
+        s = re.sub(r"<[^>]+>", "", s).strip()
+        if s:
+            lines.append(s)
+
+    # Auto-caption files often emit each phrase twice as the rolling window
+    # advances. Collapse adjacent duplicates.
+    deduped = []
+    for ln in lines:
+        if not deduped or deduped[-1] != ln:
+            deduped.append(ln)
+
+    text = " ".join(deduped)
+    return text[:max_chars]
+
+
+def predict_clip_potential(transcript, duration=0, view_count=0, age_hours=9999):
+    """Combine transcript text score with velocity+duration into ``predictedScore``.
+
+    Reuses ``features.text`` so the discovery scorer learns whatever the final
+    clip scorer learns (corpus-derived TF-IDF, hook phrases, surprise words).
+    Returns ``(transcript_score, predicted_score)``.
+    """
+    transcript_score = 0.0
+    if transcript and len(transcript) >= 40:
+        try:
+            # Local import so discover.py stays callable without the pipeline
+            # deps installed (e.g. on systems running only the yt-dlp search).
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            from features import text as text_features  # type: ignore
+
+            hook = text_features.score_hook_strength(transcript)
+            keyword = text_features.score_keyword_trigger(transcript)
+            novelty = text_features.score_novelty(transcript)
+            sentiment = text_features.score_text_sentiment(transcript)
+            # Favour hook+keyword (the two strongest viral predictors in weights.json v3)
+            transcript_score = round(
+                hook * 0.35 + keyword * 0.30 + novelty * 0.20 + abs(sentiment - 0.5) * 2 * 0.15,
+                4,
+            )
+        except Exception:
+            transcript_score = 0.0
+
+    # Velocity: views per hour, log-scaled so 1 viral video doesn't dominate.
+    velocity = 0.0
+    if age_hours and age_hours < 720 and view_count > 0:
+        import math
+        vph = view_count / max(age_hours, 1)
+        velocity = min(math.log10(max(vph, 1)) / 5.0, 1.0)
+
+    # Duration fit: 3–15 min is the clip sweet spot.
+    duration_fit = 0.0
+    if 180 <= duration <= 900:
+        duration_fit = 1.0
+    elif 120 <= duration <= 1500:
+        duration_fit = 0.7
+    elif 60 <= duration <= 1800:
+        duration_fit = 0.4
+
+    predicted = transcript_score * 0.55 + velocity * 0.25 + duration_fit * 0.20
+    return round(transcript_score, 4), round(min(predicted, 1.0), 4)
+
+
+def discover_enrich(video_url, duration=0, age_hours=9999, view_count=0, ytdlp_path="yt-dlp"):
+    transcript = sample_transcript(video_url, ytdlp_path=ytdlp_path)
+    transcript_score, predicted_score = predict_clip_potential(
+        transcript, duration=duration, view_count=view_count, age_hours=age_hours,
+    )
+    return {
+        "transcriptScore": transcript_score,
+        "predictedScore": predicted_score,
+        "transcriptSample": transcript[:500],
+        "transcriptLength": len(transcript),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="YouTube video discovery")
-    parser.add_argument("--mode", required=True, choices=["search", "trending", "channel"],
+    parser.add_argument("--mode", required=True, choices=["search", "trending", "channel", "enrich"],
                         help="Discovery mode")
     parser.add_argument("--query", default="", help="Search query (for search mode)")
     parser.add_argument("--channel-url", default="", help="Channel URL (for channel mode)")
@@ -267,6 +545,10 @@ def main():
     parser.add_argument("--max-duration", type=int, default=0, help="Max duration in seconds (0=unlimited)")
     parser.add_argument("--region", default="ID", help="Region for trending (default: ID)")
     parser.add_argument("--ytdlp-path", default="yt-dlp", help="Path to yt-dlp binary")
+    parser.add_argument("--video-url", default="", help="Video URL (for enrich mode)")
+    parser.add_argument("--duration", type=int, default=0, help="Duration seconds (enrich mode)")
+    parser.add_argument("--age-hours", type=float, default=9999, help="Age in hours (enrich mode)")
+    parser.add_argument("--view-count", type=int, default=0, help="View count (enrich mode)")
     args = parser.parse_args()
 
     try:
@@ -286,6 +568,17 @@ def main():
                 args.channel_url, args.max_results, args.ytdlp_path,
                 args.min_duration, args.max_duration,
             )
+        elif args.mode == "enrich":
+            if not args.video_url:
+                raise ValueError("--video-url is required for enrich mode")
+            enrich = discover_enrich(
+                args.video_url, duration=args.duration,
+                age_hours=args.age_hours, view_count=args.view_count,
+                ytdlp_path=args.ytdlp_path,
+            )
+            output = {"success": True, "data": enrich}
+            print(json.dumps(output, ensure_ascii=False))
+            sys.exit(0)
         else:
             raise ValueError(f"Unknown mode: {args.mode}")
 

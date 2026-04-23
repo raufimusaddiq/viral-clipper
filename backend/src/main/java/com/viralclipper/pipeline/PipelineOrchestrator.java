@@ -299,8 +299,12 @@ public class PipelineOrchestrator {
             cs.setBoostTotal(scores.path("boostTotal").asDouble());
             cs.setPenaltyTotal(scores.path("penaltyTotal").asDouble());
             clipScoreRepository.save(cs);
-
-            feedbackService.saveFeedbackSnapshot(clip, cs);
+            // NOTE: we deliberately do NOT pre-create a clip_feedback row here.
+            // A feedback row used to be auto-snapshotted for every scored clip,
+            // which inflated the "total_feedback" counter to the number of
+            // clips ever scored (90+ on a busy account) with zero real TikTok
+            // metrics attached. A feedback row is now created only when the
+            // user actually submits metrics via POST /api/clips/{id}/feedback.
         }
     }
 
@@ -394,7 +398,9 @@ public class PipelineOrchestrator {
             if (rank > 0 && rank <= clips.size()) {
                 Clip clip = clips.get(rank - 1);
                 clip.setRenderStatus(status);
-                if (!path.isEmpty()) clip.setRenderPath(path);
+                if ("COMPLETED".equals(status) && !path.isEmpty()) {
+                    clip.setRenderPath(path);
+                }
                 clipRepository.save(clip);
             }
         }
@@ -405,17 +411,82 @@ public class PipelineOrchestrator {
         String segmentsPath = appConfig.getDataDir() + "/segments/" + video.getId() + ".json";
         String renderDir = appConfig.getDataDir() + "/renders/";
         String exportDir = appConfig.getDataDir() + "/exports/";
+        new java.io.File(exportDir).mkdirs();
 
-        List<String> args = List.of(
-                "--transcript", transcriptPath,
-                "--segments", segmentsPath,
-                "--render-dir", renderDir,
-                "--output-dir", exportDir
-        );
+        // Same fan-out pattern as stageRender: the list of clips to burn is already
+        // filtered (PRIMARY + BACKUP only), and each subtitle.py invocation is an
+        // independent ffmpeg call on a different input file, so we can run two in
+        // parallel without contending for the same file or (meaningfully) the GPU.
+        String segJson = new String(Files.readAllBytes(Paths.get(segmentsPath)));
+        JsonNode segData = objectMapper.readTree(segJson);
+        JsonNode scored = segData.path("scoredSegments");
+        List<String> tiers = List.of("PRIMARY", "BACKUP");
+        List<Integer> toSubtitle = new ArrayList<>();
+        for (int i = 0; i < scored.size(); i++) {
+            String tier = scored.get(i).path("tier").asText("");
+            if (tiers.contains(tier)) toSubtitle.add(i);
+        }
 
-        JsonNode result = pythonRunner.runScript("subtitle.py", args);
+        StageStatus subtitleStage = stageStatusRepository.findByJobId(job.getId()).stream()
+                .filter(s -> "SUBTITLE".equals(s.getStage())).findFirst().orElse(null);
 
-        updateClipExportStatuses(video.getId(), result);
+        int maxParallelBurns = 2;
+        ExecutorService pool = Executors.newFixedThreadPool(maxParallelBurns);
+        List<Future<RenderResult>> futures = new ArrayList<>();
+
+        for (int idx : toSubtitle) {
+            Job fresh = jobRepository.findById(job.getId()).orElse(job);
+            if ("CANCELLED".equals(fresh.getStatus())) {
+                pool.shutdownNow();
+                throw new RuntimeException("Job cancelled by user");
+            }
+
+            final int clipIdx = idx;
+            futures.add(pool.submit(() -> {
+                List<String> args = List.of(
+                        "--transcript", transcriptPath,
+                        "--segments", segmentsPath,
+                        "--render-dir", renderDir,
+                        "--output-dir", exportDir,
+                        "--clip-index", String.valueOf(clipIdx)
+                );
+                try {
+                    JsonNode result = pythonRunner.runScript("subtitle.py", args);
+                    return new RenderResult(clipIdx, true, result, null);
+                } catch (Exception e) {
+                    log.warn("Subtitle burn failed for clip index {}: {}", clipIdx, e.getMessage());
+                    return new RenderResult(clipIdx, false, null, e.getMessage());
+                }
+            }));
+        }
+
+        pool.shutdown();
+
+        int burned = 0, failed = 0;
+        for (Future<RenderResult> f : futures) {
+            try {
+                RenderResult rr = f.get();
+                if (rr.success) {
+                    updateClipExportStatuses(video.getId(), rr.result);
+                    burned++;
+                } else {
+                    failed++;
+                }
+                if (subtitleStage != null) {
+                    subtitleStage.setOutputPath("Burning " + (burned + failed) + "/" + toSubtitle.size() + " clips");
+                    stageStatusRepository.save(subtitleStage);
+                }
+            } catch (Exception e) {
+                failed++;
+                log.warn("Subtitle future failed: {}", e.getMessage());
+            }
+        }
+
+        if (subtitleStage != null) {
+            subtitleStage.setOutputPath(burned + " burned, " + failed + " failed");
+            stageStatusRepository.save(subtitleStage);
+        }
+
         return exportDir;
     }
 
@@ -429,7 +500,9 @@ public class PipelineOrchestrator {
             if (rank > 0 && rank <= clips.size()) {
                 Clip clip = clips.get(rank - 1);
                 clip.setExportStatus(status);
-                if (!path.isEmpty()) clip.setExportPath(path);
+                if ("COMPLETED".equals(status) && !path.isEmpty()) {
+                    clip.setExportPath(path);
+                }
                 clipRepository.save(clip);
             }
         }

@@ -94,7 +94,56 @@ CREATE INDEX IF NOT EXISTS idx_stage_job ON stage_status(job_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_clip ON clip_feedback(clip_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_video ON clip_feedback(video_id);
 
+-- Indexes that back the scheduled orphan-job sweep (status + updated_at scan)
+-- and the "which stages are running now?" queries.
+CREATE INDEX IF NOT EXISTS idx_job_updated_at ON job(updated_at);
+CREATE INDEX IF NOT EXISTS idx_stage_status_stage_status ON stage_status(stage, status);
+
 -- Migrations for existing databases
 ALTER TABLE clip ADD COLUMN title TEXT;
 ALTER TABLE clip ADD COLUMN description TEXT;
 ALTER TABLE clip_score ADD COLUMN text_sentiment REAL;
+
+-- Discovery persistence (D1). Candidates surfaced by yt-dlp search/trending/channel
+-- live here until the user queues them or skips. job_id is populated once imported
+-- so we can later correlate predicted_score with the clip_feedback viral scores.
+CREATE TABLE IF NOT EXISTS discovered_video (
+    id TEXT PRIMARY KEY,
+    youtube_id TEXT NOT NULL,
+    url TEXT NOT NULL,
+    title TEXT,
+    channel TEXT,
+    duration_sec INTEGER DEFAULT 0,
+    view_count INTEGER,
+    upload_date TEXT,
+    age_hours REAL,
+    source_mode TEXT NOT NULL,
+    source_query TEXT,
+    relevance_score REAL DEFAULT 0,
+    transcript_score REAL,
+    predicted_score REAL,
+    transcript_sample TEXT,
+    status TEXT NOT NULL DEFAULT 'NEW',
+    job_id TEXT,
+    video_id TEXT,
+    discovered_at TEXT NOT NULL,
+    enriched_at TEXT,
+    UNIQUE(youtube_id)
+);
+
+-- Saved searches / monitored channels. last_run_at feeds the scheduled refresh (D5).
+CREATE TABLE IF NOT EXISTS discovery_query (
+    id TEXT PRIMARY KEY,
+    mode TEXT NOT NULL,
+    query TEXT NOT NULL,
+    channel_url TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    auto_refresh_hours INTEGER NOT NULL DEFAULT 24,
+    last_run_at TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_discovered_status_score ON discovered_video(status, predicted_score DESC);
+CREATE INDEX IF NOT EXISTS idx_discovered_status_relevance ON discovered_video(status, relevance_score DESC);
+CREATE INDEX IF NOT EXISTS idx_discovered_youtube_id ON discovered_video(youtube_id);
+CREATE INDEX IF NOT EXISTS idx_discovery_query_active ON discovery_query(active, last_run_at);

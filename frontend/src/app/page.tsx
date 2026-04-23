@@ -2,247 +2,24 @@
 
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react';
 import { ApiClient } from '@/lib/api';
+import { reportError, onError, isAbortError } from '@/lib/errors';
+import type {
+  Video, Job, StageStatus, Clip, ClipScore,
+  JobDetail, ClipDetail, VideoGroup,
+} from '@/types';
+import {
+  STAGE_LABELS, TIER_COLORS, STAGE_ORDER, STATUS_COLORS,
+  formatTime, formatDuration, formatDurationSec, timeAgo, tierLabel, videoLabel,
+} from '@/lib/ui-utils';
+import { ProgressBar, ScoreBadge, TranscriptView } from '@/components/progress';
 
-type Video = {
-  id: string;
-  sourceType: string;
-  sourceUrl: string | null;
-  title: string | null;
-  filePath: string | null;
-  createdAt: string;
-};
+// Adaptive polling bounds for job status — start fast so stage transitions
+// feel snappy, back off so a 6-min RENDER stage doesn't fire 180 requests.
+const POLL_MIN_MS = 1000;
+const POLL_MAX_MS = 10000;
 
-type Job = {
-  id: string;
-  videoId: string;
-  status: string;
-  currentStage: string;
-  errorMessage: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
-
-type StageStatus = {
-  id: string;
-  jobId: string;
-  stage: string;
-  status: string;
-  startedAt: string | null;
-  completedAt: string | null;
-  outputPath?: string;
-};
-
-type Clip = {
-  id: string;
-  videoId: string;
-  rankPos: number | null;
-  score: number | null;
-  tier: string;
-  startTime: number;
-  endTime: number;
-  durationSec: number;
-  textContent: string | null;
-  title: string | null;
-  description: string | null;
-  renderStatus: string;
-  renderPath: string | null;
-  exportStatus: string;
-  exportPath: string | null;
-  createdAt: string;
-};
-
-type ClipScore = {
-  hookStrength: number | null;
-  keywordTrigger: number | null;
-  novelty: number | null;
-  clarity: number | null;
-  emotionalEnergy: number | null;
-  textSentiment: number | null;
-  pauseStructure: number | null;
-  facePresence: number | null;
-  sceneChange: number | null;
-  topicFit: number | null;
-  historyScore: number | null;
-  boostTotal: number;
-  penaltyTotal: number;
-};
-
-type JobDetail = {
-  job: Job;
-  stages: StageStatus[];
-};
-
-type ClipDetail = {
-  clip: Clip;
-  scoreBreakdown?: ClipScore;
-};
-
-type VideoGroup = {
-  video: Video;
-  job: Job | null;
-  jobDetail: JobDetail | null;
-  clips: Clip[];
-  expanded: boolean;
-};
-
-const STAGE_LABELS: Record<string, string> = {
-  IMPORT: 'Import Video',
-  AUDIO_EXTRACT: 'Extract Audio',
-  TRANSCRIBE: 'Transcribe',
-  SEGMENT: 'Segment',
-  SCORE: 'Score',
-  RENDER: 'Render Clips',
-  SUBTITLE: 'Add Subtitles',
-  VARIATION: 'Generate Variations',
-  ANALYTICS: 'Analytics',
-};
-
-const TIER_COLORS: Record<string, string> = {
-  PRIMARY: 'bg-green-600/20 text-green-400 border-green-600/40',
-  BACKUP: 'bg-yellow-600/20 text-yellow-400 border-yellow-600/40',
-  SKIP: 'bg-red-600/20 text-red-400 border-red-600/40',
-};
-
-const STAGE_ORDER = [
-  'IMPORT', 'AUDIO_EXTRACT', 'TRANSCRIBE', 'SEGMENT',
-  'SCORE', 'RENDER', 'SUBTITLE', 'VARIATION', 'ANALYTICS',
-];
-
-const STATUS_COLORS: Record<string, string> = {
-  COMPLETED: 'bg-green-400',
-  FAILED: 'bg-red-400',
-  RUNNING: 'bg-blue-400 animate-pulse',
-  PENDING: 'bg-zinc-500',
-  IN_PROGRESS: 'bg-blue-400 animate-pulse',
-  QUEUED: 'bg-yellow-400',
-  CANCELLED: 'bg-orange-400',
-};
-
-function formatTime(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, '0')}`;
-}
-
-function formatDuration(seconds: number): string {
-  return `${seconds.toFixed(1)}s`;
-}
-
-function timeAgo(dateStr: string): string {
-  try {
-    const d = new Date(dateStr);
-    const now = new Date();
-    const diff = Math.floor((now.getTime() - d.getTime()) / 1000);
-    if (diff < 60) return 'just now';
-    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-    return `${Math.floor(diff / 86400)}d ago`;
-  } catch (_) { return '';
-  }
-}
-
-function tierLabel(tier: string): string {
-  switch (tier) {
-    case 'PRIMARY': return 'VIRAL';
-    case 'BACKUP': return 'POTENTIAL';
-    case 'SKIP': return 'SKIP';
-    default: return tier;
-  }
-}
-
-function videoLabel(video: Video): string {
-  if (video.sourceUrl && video.sourceUrl.startsWith('http')) {
-    try {
-      const url = new URL(video.sourceUrl);
-      return url.hostname + url.pathname.substring(0, 30);
-    } catch (_) { return video.sourceUrl.substring(0, 40);
-    }
-  }
-  return video.sourceUrl || video.id.substring(0, 8);
-}
-
-function ProgressBar({ stages }: { stages: StageStatus[] }) {
-  const total = STAGE_ORDER.length;
-  const completed = stages.filter(s => s.status === 'COMPLETED').length;
-  const current = stages.find(s => s.status === 'RUNNING' || s.status === 'IN_PROGRESS');
-  const pct = Math.round((completed / total) * 100);
-  const renderStage = stages.find(s => s.stage === 'RENDER' && (s.status === 'RUNNING' || s.status === 'IN_PROGRESS'));
-
-  return (
-    <div className="space-y-2">
-      <div className="flex justify-between text-xs text-zinc-400">
-        <span>{current ? STAGE_LABELS[current.stage] || current.stage : 'Waiting...'}</span>
-        <span>{pct}%</span>
-      </div>
-      <div className="h-2 bg-zinc-800 rounded-full overflow-hidden">
-        <div className="h-full bg-blue-500 rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
-      </div>
-      {renderStage?.outputPath && (
-        <p className="text-xs text-blue-400">{renderStage.outputPath}</p>
-      )}
-      <div className="grid grid-cols-3 gap-1 mt-2">
-        {STAGE_ORDER.map((stage) => {
-          const stageStatus = stages.find(s => s.stage === stage);
-          const status = stageStatus?.status || 'PENDING';
-          const isCurrent = status === 'RUNNING' || status === 'IN_PROGRESS';
-          const isDone = status === 'COMPLETED';
-          const isFailed = status === 'FAILED';
-          return (
-            <div key={stage} className={`text-xs px-1 py-0.5 rounded truncate ${
-              isDone ? 'text-green-400 bg-green-900/30' :
-              isCurrent ? 'text-blue-400 bg-blue-900/30 animate-pulse' :
-              isFailed ? 'text-red-400 bg-red-900/30' : 'text-zinc-600'
-            }`} title={STAGE_LABELS[stage] || stage}>
-              {isDone ? '\u2713' : isFailed ? '\u2717' : isCurrent ? '\u25cf' : '\u25cb'} {STAGE_LABELS[stage] || stage}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function ScoreBadge({ score, label }: { score: number | null; label: string }) {
-  if (score === null) return null;
-  const color = score >= 0.7 ? 'text-green-400' : score >= 0.4 ? 'text-yellow-400' : 'text-red-400';
-  return (
-    <div className="flex justify-between items-center text-xs">
-      <span className="text-zinc-400">{label}</span>
-      <span className={`font-mono ${color}`}>{(score * 100).toFixed(0)}%</span>
-    </div>
-  );
-}
-
-function TranscriptView({ clips, filterTier }: { clips: Clip[]; filterTier: string }) {
-  const filtered = filterTier === 'ALL' ? clips : clips.filter(c => c.tier === filterTier);
-  if (filtered.length === 0) return <p className="text-zinc-500 text-sm py-4">No clips to show.</p>;
-
-  return (
-    <div className="space-y-3">
-      {filtered.map(clip => (
-        <div key={clip.id} className="bg-zinc-800/50 rounded-lg p-4 border border-zinc-700/50">
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-sm font-bold text-zinc-200">#{clip.rankPos || '-'}</span>
-            <span className={`px-2 py-0.5 rounded text-xs font-medium border ${TIER_COLORS[clip.tier] || ''}`}>
-              {tierLabel(clip.tier)}
-            </span>
-            <span className="text-xs text-zinc-500">
-              {formatTime(clip.startTime)} \u2192 {formatTime(clip.endTime)} ({formatDuration(clip.durationSec)})
-            </span>
-            {clip.score !== null && (
-              <span className="ml-auto text-sm font-bold text-zinc-200">{(clip.score * 100).toFixed(0)}%</span>
-            )}
-          </div>
-          {clip.textContent ? (
-            <p className="text-sm text-zinc-300 leading-relaxed whitespace-pre-wrap">{clip.textContent}</p>
-          ) : (
-            <p className="text-sm text-zinc-600 italic">No transcript available</p>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
+// Kept-in-file components: ClipCard + DiscoveryPanel are deeply coupled to
+// Home's state and refresh handlers; their extraction is a separate PR.
 
 function ClipCard({
   clip, score, previewing, onPreview, onExport, api,
@@ -255,8 +32,14 @@ function ClipCard({
   const [showScore, setShowScore] = useState(false);
   const [showFeedback, setShowFeedback] = useState(false);
   const [showMeta, setShowMeta] = useState(false);
-  const [feedback, setFeedback] = useState({ views: '', likes: '', comments: '', shares: '', saves: '' });
+  const [feedback, setFeedback] = useState({
+    views: '', likes: '', comments: '', shares: '', saves: '',
+    // datetime-local format (yyyy-MM-ddTHH:mm) in the browser's local tz;
+    // converted to ISO-8601 UTC on submit.
+    postedAt: '',
+  });
   const [submitting, setSubmitting] = useState(false);
+  const [feedbackError, setFeedbackError] = useState<string | null>(null);
   const [viralScore, setViralScore] = useState<number | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
 
@@ -267,6 +50,20 @@ function ClipCard({
   };
 
   const handleSubmitFeedback = async () => {
+    setFeedbackError(null);
+    if (!feedback.postedAt) {
+      setFeedbackError('Isi tanggal upload TikTok dulu — viral score butuh durasi di platform.');
+      return;
+    }
+    const postedDate = new Date(feedback.postedAt);
+    if (Number.isNaN(postedDate.getTime())) {
+      setFeedbackError('Format tanggal tidak valid.');
+      return;
+    }
+    if (postedDate.getTime() > Date.now()) {
+      setFeedbackError('Tanggal upload tidak boleh di masa depan.');
+      return;
+    }
     setSubmitting(true);
     try {
       const result = await api.submitFeedback(clip.id, {
@@ -275,17 +72,21 @@ function ClipCard({
         comments: parseInt(feedback.comments) || 0,
         shares: parseInt(feedback.shares) || 0,
         saves: parseInt(feedback.saves) || 0,
+        postedAt: postedDate.toISOString(),
       });
       const data = result as { viralScore: number };
       setViralScore(data.viralScore);
-    } catch (_) { /* noop */ } finally {
+    } catch (e) {
+      setFeedbackError(e instanceof Error ? e.message : 'Gagal submit feedback');
+      reportError(e, 'submitFeedback');
+    } finally {
       setSubmitting(false);
     }
   };
 
   return (
-    <div className={`bg-zinc-800/50 rounded-lg overflow-hidden border transition-colors ${
-      selected ? 'border-blue-500 ring-1 ring-blue-500/30' : 'border-zinc-700/50 hover:border-zinc-600'
+    <div className={`bg-surface-2 rounded-lg overflow-hidden border transition-colors ${
+      selected ? 'border-accent ring-1 ring-accent/30' : 'border-line hover:border-line'
     }`}>
       <div className="p-4">
         <div className="flex items-start justify-between mb-2">
@@ -295,8 +96,8 @@ function ClipCard({
                 onClick={(e) => { e.stopPropagation(); onSelect?.(); }}
                 className={`w-5 h-5 rounded flex items-center justify-center border transition-colors flex-shrink-0 ${
                   selected
-                    ? 'bg-blue-600 border-blue-500 text-white'
-                    : 'bg-zinc-900 border-zinc-600 hover:border-zinc-400'
+                    ? 'bg-accent border-accent text-white'
+                    : 'bg-surface border-line hover:border-fg/20'
                 }`}
                 aria-label="Select clip"
               >
@@ -307,108 +108,133 @@ function ClipCard({
                 )}
               </button>
             )}
-            <span className="text-lg font-bold text-zinc-100">#{clip.rankPos || '-'}</span>
+            <span className="text-lg font-bold text-fg">#{clip.rankPos || '-'}</span>
             <span className={`px-2 py-0.5 rounded text-xs font-medium border ${TIER_COLORS[clip.tier] || ''}`}>
               {tierLabel(clip.tier)}
             </span>
           </div>
           <div className="text-right">
-            <div className="text-2xl font-bold text-zinc-100">{clip.score ? (clip.score * 100).toFixed(0) : '-'}</div>
-            <div className="text-xs text-zinc-500">score</div>
+            <div className="text-2xl font-bold text-fg">{clip.score ? (clip.score * 100).toFixed(0) : '-'}</div>
+            <div className="text-xs text-subtle">score</div>
           </div>
         </div>
         {clip.title && (
-          <p className="text-sm font-medium text-zinc-200 mb-1 line-clamp-2">{clip.title}</p>
+          <p className="text-sm font-medium text-fg mb-1 line-clamp-2">{clip.title}</p>
         )}
-        <div className="flex gap-4 text-xs text-zinc-400 mb-3">
+        <div className="flex gap-4 text-xs text-muted mb-3">
           <span>{formatTime(clip.startTime)} &#8594; {formatTime(clip.endTime)}</span>
           <span>&#8226;</span>
           <span>{formatDuration(clip.durationSec)}</span>
         </div>
         {clip.textContent && (
-          <p className="text-sm text-zinc-300 line-clamp-3 mb-3">{clip.textContent}</p>
+          <p className="text-sm text-fg/85 line-clamp-3 mb-3">{clip.textContent}</p>
         )}
         <div className="flex gap-2">
           {clip.renderPath && (
             <button onClick={onPreview} className={`flex-1 py-1.5 rounded text-xs font-medium transition-colors ${
-              previewing ? 'bg-blue-600 text-white' : 'bg-zinc-700 text-zinc-300 hover:bg-zinc-600'
+              previewing ? 'bg-accent text-white' : 'bg-surface-3 text-fg/85 hover:bg-surface-3'
             }`}>{previewing ? 'Playing...' : 'Preview'}</button>
           )}
           {score && (
-            <button onClick={() => setShowScore(!showScore)} className="flex-1 py-1.5 rounded text-xs font-medium bg-zinc-700 text-zinc-300 hover:bg-zinc-600 transition-colors">
+            <button onClick={() => setShowScore(!showScore)} className="flex-1 py-1.5 rounded text-xs font-medium bg-surface-3 text-fg/85 hover:bg-surface-3 transition-colors">
               {showScore ? 'Hide' : 'Score'}
             </button>
           )}
           {(clip.title || clip.description) && (
-            <button onClick={() => setShowMeta(!showMeta)} className="flex-1 py-1.5 rounded text-xs font-medium bg-purple-700 text-zinc-200 hover:bg-purple-600 transition-colors">
+            <button onClick={() => setShowMeta(!showMeta)} className="flex-1 py-1.5 rounded text-xs font-medium bg-accent text-fg hover:bg-accent/90 transition-colors">
               {showMeta ? 'Hide' : 'Copy'}
             </button>
           )}
           {clip.exportPath && (
-            <a href={api.getExportUrl(clip.id)} className="flex-1 py-1.5 rounded text-xs font-medium bg-green-700 text-white hover:bg-green-600 transition-colors text-center">Download</a>
+            <a href={api.getExportUrl(clip.id)} className="flex-1 py-1.5 rounded text-xs font-medium bg-success text-white hover:bg-success/90 transition-colors text-center">Download</a>
           )}
           {!clip.exportPath && clip.renderStatus === 'COMPLETED' && (
-            <button onClick={onExport} className="flex-1 py-1.5 rounded text-xs font-medium bg-zinc-700 text-zinc-300 hover:bg-zinc-600 transition-colors">Export</button>
+            <button onClick={onExport} className="flex-1 py-1.5 rounded text-xs font-medium bg-surface-3 text-fg/85 hover:bg-surface-3 transition-colors">Export</button>
           )}
-          <button onClick={() => setShowFeedback(!showFeedback)} className="py-1.5 px-2 rounded text-xs font-medium bg-zinc-700 text-zinc-400 hover:bg-zinc-600 transition-colors">
+          <button onClick={() => setShowFeedback(!showFeedback)} className="py-1.5 px-2 rounded text-xs font-medium bg-surface-3 text-muted hover:bg-surface-3 transition-colors">
             {viralScore !== null ? `${(viralScore * 100).toFixed(0)}%` : 'FB'}
           </button>
         </div>
       </div>
       {showMeta && (clip.title || clip.description) && (
-        <div className="border-t border-zinc-700/50 px-4 py-3 space-y-2">
+        <div className="border-t border-line px-4 py-3 space-y-2">
           {clip.title && (
             <div>
               <div className="flex items-center justify-between mb-1">
-                <span className="text-xs text-zinc-500 font-medium">Title</span>
-                <button onClick={() => handleCopy(clip.title!, 'title')} className="text-xs text-blue-400 hover:text-blue-300">
+                <span className="text-xs text-subtle font-medium">Title</span>
+                <button onClick={() => handleCopy(clip.title!, 'title')} className="text-xs text-accent hover:text-accent/80">
                   {copied === 'title' ? 'Copied!' : 'Copy'}
                 </button>
               </div>
-              <p className="text-sm text-zinc-200 bg-zinc-900/50 rounded p-2">{clip.title}</p>
+              <p className="text-sm text-fg bg-bg rounded p-2">{clip.title}</p>
             </div>
           )}
           {clip.description && (
             <div>
               <div className="flex items-center justify-between mb-1">
-                <span className="text-xs text-zinc-500 font-medium">Description</span>
-                <button onClick={() => handleCopy(clip.description!, 'desc')} className="text-xs text-blue-400 hover:text-blue-300">
+                <span className="text-xs text-subtle font-medium">Description</span>
+                <button onClick={() => handleCopy(clip.description!, 'desc')} className="text-xs text-accent hover:text-accent/80">
                   {copied === 'desc' ? 'Copied!' : 'Copy'}
                 </button>
               </div>
-              <p className="text-sm text-zinc-300 bg-zinc-900/50 rounded p-2 whitespace-pre-wrap">{clip.description}</p>
+              <p className="text-sm text-fg/85 bg-bg rounded p-2 whitespace-pre-wrap">{clip.description}</p>
             </div>
           )}
         </div>
       )}
       {showFeedback && (
-        <div className="border-t border-zinc-700/50 px-4 py-3 space-y-2">
-          <span className="text-xs text-zinc-500 font-medium">TikTok Performance</span>
-          <div className="grid grid-cols-5 gap-1">
-            <input type="number" placeholder="Views" value={feedback.views} onChange={e => setFeedback(f => ({...f, views: e.target.value}))}
-              className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 w-full" />
-            <input type="number" placeholder="Likes" value={feedback.likes} onChange={e => setFeedback(f => ({...f, likes: e.target.value}))}
-              className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 w-full" />
-            <input type="number" placeholder="Comments" value={feedback.comments} onChange={e => setFeedback(f => ({...f, comments: e.target.value}))}
-              className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 w-full" />
-            <input type="number" placeholder="Shares" value={feedback.shares} onChange={e => setFeedback(f => ({...f, shares: e.target.value}))}
-              className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 w-full" />
-            <input type="number" placeholder="Saves" value={feedback.saves} onChange={e => setFeedback(f => ({...f, saves: e.target.value}))}
-              className="bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-200 w-full" />
+        <div className="border-t border-line px-4 py-3 space-y-3">
+          <div className="space-y-1">
+            <label className="text-xs text-muted font-medium block">
+              Tanggal & jam upload ke TikTok
+              <span className="text-accent ml-1">*</span>
+            </label>
+            <input
+              type="datetime-local"
+              value={feedback.postedAt}
+              onChange={e => setFeedback(f => ({ ...f, postedAt: e.target.value }))}
+              max={new Date(Date.now() - 60000).toISOString().slice(0, 16)}
+              className="bg-surface border border-line rounded px-2 py-1.5 text-xs text-fg w-full"
+            />
+            <p className="text-xs text-subtle">
+              Viral score dihitung per-hari (velocity), jadi durasi di TikTok wajib diisi.
+            </p>
           </div>
+          <div className="space-y-1">
+            <span className="text-xs text-muted font-medium block">Metrik TikTok saat ini</span>
+            <div className="grid grid-cols-5 gap-1">
+              <input type="number" placeholder="Views" value={feedback.views} onChange={e => setFeedback(f => ({...f, views: e.target.value}))}
+                className="bg-surface border border-line rounded px-2 py-1 text-xs text-fg w-full" />
+              <input type="number" placeholder="Likes" value={feedback.likes} onChange={e => setFeedback(f => ({...f, likes: e.target.value}))}
+                className="bg-surface border border-line rounded px-2 py-1 text-xs text-fg w-full" />
+              <input type="number" placeholder="Comments" value={feedback.comments} onChange={e => setFeedback(f => ({...f, comments: e.target.value}))}
+                className="bg-surface border border-line rounded px-2 py-1 text-xs text-fg w-full" />
+              <input type="number" placeholder="Shares" value={feedback.shares} onChange={e => setFeedback(f => ({...f, shares: e.target.value}))}
+                className="bg-surface border border-line rounded px-2 py-1 text-xs text-fg w-full" />
+              <input type="number" placeholder="Saves" value={feedback.saves} onChange={e => setFeedback(f => ({...f, saves: e.target.value}))}
+                className="bg-surface border border-line rounded px-2 py-1 text-xs text-fg w-full" />
+            </div>
+          </div>
+          {feedbackError && (
+            <p className="text-xs text-error bg-error-tint border border-error/30 rounded px-2 py-1">
+              {feedbackError}
+            </p>
+          )}
           <div className="flex items-center gap-2">
             <button onClick={handleSubmitFeedback} disabled={submitting}
-              className="px-3 py-1 rounded text-xs font-medium bg-blue-600 text-white hover:bg-blue-500 disabled:bg-zinc-700 disabled:text-zinc-500 transition-colors">
-              {submitting ? 'Saving...' : 'Submit'}
+              className="px-3 py-1.5 rounded text-xs font-medium bg-accent text-white hover:bg-accent/90 disabled:bg-surface-3 disabled:text-subtle transition-colors">
+              {submitting ? 'Saving...' : 'Submit feedback'}
             </button>
             {viralScore !== null && (
-              <span className="text-xs text-green-400">Viral Score: {(viralScore * 100).toFixed(1)}%</span>
+              <span className="text-xs font-mono text-success">
+                Viral Score: {(viralScore * 100).toFixed(1)}%
+              </span>
             )}
           </div>
         </div>
       )}
       {showScore && score && (
-        <div className="border-t border-zinc-700/50 px-4 py-3 space-y-1">
+        <div className="border-t border-line px-4 py-3 space-y-1">
           <ScoreBadge score={score.hookStrength} label="Hook" />
           <ScoreBadge score={score.keywordTrigger} label="Keywords" />
           <ScoreBadge score={score.novelty} label="Novelty" />
@@ -419,10 +245,10 @@ function ClipCard({
           <ScoreBadge score={score.facePresence} label="Face" />
           <ScoreBadge score={score.sceneChange} label="Scenes" />
           <ScoreBadge score={score.topicFit} label="Topic Fit" />
-          <div className="border-t border-zinc-700/50 pt-1 mt-1">
+          <div className="border-t border-line pt-1 mt-1">
             <div className="flex justify-between text-xs">
-              <span className="text-green-400">Boost +{(score.boostTotal * 100).toFixed(0)}%</span>
-              <span className="text-red-400">Penalty -{(score.penaltyTotal * 100).toFixed(0)}%</span>
+              <span className="text-success">Boost +{(score.boostTotal * 100).toFixed(0)}%</span>
+              <span className="text-error">Penalty -{(score.penaltyTotal * 100).toFixed(0)}%</span>
             </div>
           </div>
         </div>
@@ -432,7 +258,9 @@ function ClipCard({
 }
 
 type DiscoveredVideo = {
-  videoId: string;
+  id: string;              // persisted row id
+  youtubeId: string;
+  videoId: string;         // legacy alias = youtubeId
   title: string;
   url: string;
   duration: number;
@@ -440,43 +268,56 @@ type DiscoveredVideo = {
   viewCount: number | null;
   uploadDate: string;
   relevanceScore: number;
+  transcriptScore: number | null;
+  predictedScore: number | null;
+  status: 'NEW' | 'QUEUED' | 'IMPORTED' | 'SKIPPED' | 'FAILED';
+  jobId: string | null;
+  sourceMode: string;
+  sourceQuery: string;
 };
 
 type DiscoveryMode = 'search' | 'trending' | 'channel';
 type MainTab = 'import' | 'discovery' | 'learning';
 type TabKey = 'clips' | 'transcript';
 
-function formatDurationSec(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, '0')}`;
-}
-
-function DiscoveryPanel({ api, onImport }: { api: ApiClient; onImport: (url: string) => Promise<void> }) {
+function DiscoveryPanel({ api }: { api: ApiClient; onImport: (url: string) => Promise<void> }) {
   const [mode, setMode] = useState<DiscoveryMode>('search');
   const [query, setQuery] = useState('');
   const [channelUrl, setChannelUrl] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [results, setResults] = useState<DiscoveredVideo[]>([]);
-  const [importingIds, setImportingIds] = useState<Set<string>>(new Set());
+  const [candidates, setCandidates] = useState<DiscoveredVideo[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [filter, setFilter] = useState<'ACTIVE' | 'NEW' | 'QUEUED' | 'IMPORTED' | 'SKIPPED'>('ACTIVE');
+  const [draining, setDraining] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const data = await api.listCandidates(filter === 'ACTIVE' ? undefined : filter) as { videos: DiscoveredVideo[] };
+      setCandidates(data.videos || []);
+    } catch (e) { reportError(e, 'discover.listCandidates'); }
+  }, [api, filter]);
+
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  // Poll while enrichment is in flight (any NEW row lacking transcriptScore).
+  useEffect(() => {
+    const pending = candidates.some(c => c.status === 'NEW' && c.transcriptScore === null);
+    if (!pending) return;
+    const t = setTimeout(() => { void refresh(); }, 3000);
+    return () => clearTimeout(t);
+  }, [candidates, refresh]);
 
   const handleSearch = async () => {
     if (mode === 'search' && !query.trim()) return;
     if (mode === 'channel' && !channelUrl.trim()) return;
     setLoading(true);
     setError(null);
-    setResults([]);
     try {
-      let data;
-      if (mode === 'search') {
-        data = await api.discoverSearch(query.trim()) as { videos: DiscoveredVideo[] };
-      } else if (mode === 'trending') {
-        data = await api.discoverTrending() as { videos: DiscoveredVideo[] };
-      } else {
-        data = await api.discoverChannel(channelUrl.trim()) as { videos: DiscoveredVideo[] };
-      }
-      setResults(data.videos || []);
+      if (mode === 'search') await api.discoverSearch(query.trim());
+      else if (mode === 'trending') await api.discoverTrending();
+      else await api.discoverChannel(channelUrl.trim());
+      await refresh();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Discovery failed');
     } finally {
@@ -484,32 +325,56 @@ function DiscoveryPanel({ api, onImport }: { api: ApiClient; onImport: (url: str
     }
   };
 
-  const handleImportOne = async (video: DiscoveredVideo) => {
-    setImportingIds(prev => new Set([...prev, video.videoId]));
+  const toggleSelect = (id: string) => {
+    setSelected(prev => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  };
+
+  const handleQueueSelected = async () => {
+    if (selected.size === 0) return;
     try {
-      await onImport(video.url);
-    } catch (_) { /* noop */ }
-    setImportingIds(prev => { const n = new Set(prev); n.delete(video.videoId); return n; });
+      await api.queueCandidates(Array.from(selected));
+      setSelected(new Set());
+      await refresh();
+    } catch (e) { reportError(e, 'discover.queue'); }
   };
 
-  const handleImportTopN = async (n: number) => {
-    const top = results.filter(v => v.relevanceScore >= 0.6).slice(0, n);
-    for (const v of top) {
-      setImportingIds(prev => new Set([...prev, v.videoId]));
-      try { await onImport(v.url); } catch (_) { /* noop */ }
-      setImportingIds(prev => { const next = new Set(prev); next.delete(v.videoId); return next; });
-    }
+  const handleDrain = async () => {
+    setDraining(true);
+    try {
+      await api.drainCandidateQueue();
+      await refresh();
+    } catch (e) { reportError(e, 'discover.drain'); }
+    finally { setDraining(false); }
   };
 
-  const highRelevance = results.filter(v => v.relevanceScore >= 0.6).length;
+  const handleSkip = async (id: string) => {
+    try {
+      await api.updateCandidateStatus(id, 'SKIPPED');
+      await refresh();
+    } catch (e) { reportError(e, 'discover.skip'); }
+  };
+
+  const handleUnskip = async (id: string) => {
+    try {
+      await api.updateCandidateStatus(id, 'NEW');
+      await refresh();
+    } catch (e) { reportError(e, 'discover.unskip'); }
+  };
+
+  const queuedCount = candidates.filter(c => c.status === 'QUEUED').length;
+  const newCount = candidates.filter(c => c.status === 'NEW').length;
 
   return (
     <div className="space-y-4">
-      <div className="bg-zinc-900 rounded-lg p-6">
+      <div className="bg-surface rounded-card p-6 border border-line">
         <div className="flex gap-2 mb-4">
           {(['search', 'trending', 'channel'] as DiscoveryMode[]).map(m => (
-            <button key={m} onClick={() => setMode(m)} className={`px-4 py-2 rounded text-sm font-medium transition-colors ${
-              mode === m ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+            <button key={m} onClick={() => setMode(m)} className={`px-4 py-2 rounded-card text-sm font-medium transition-colors border ${
+              mode === m ? 'bg-accent text-white border-accent' : 'bg-surface-2 text-muted border-line hover:bg-surface-3'
             }`}>{m.charAt(0).toUpperCase() + m.slice(1)}</button>
           ))}
         </div>
@@ -517,87 +382,132 @@ function DiscoveryPanel({ api, onImport }: { api: ApiClient; onImport: (url: str
         <div className="flex gap-3">
           {mode === 'search' && (
             <input type="text" value={query} onChange={e => setQuery(e.target.value)}
-              placeholder="Search keywords (e.g. rahasia penting indonesia)..."
+              placeholder="Search keywords (e.g. rahasia penting indonesia)…"
               onKeyDown={e => e.key === 'Enter' && handleSearch()}
-              className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500" />
+              className="flex-1 bg-surface-2 border border-line rounded-card px-3 py-2 text-sm focus:outline-none focus:border-accent" />
           )}
           {mode === 'channel' && (
             <input type="text" value={channelUrl} onChange={e => setChannelUrl(e.target.value)}
               placeholder="YouTube channel URL (e.g. https://youtube.com/@channel)"
               onKeyDown={e => e.key === 'Enter' && handleSearch()}
-              className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500" />
+              className="flex-1 bg-surface-2 border border-line rounded-card px-3 py-2 text-sm focus:outline-none focus:border-accent" />
           )}
           {mode === 'trending' && (
-            <div className="flex-1 text-sm text-zinc-400 py-2">Fetches current Indonesian trending videos</div>
+            <div className="flex-1 text-sm text-muted py-2">Fetches current Indonesian trending videos</div>
           )}
           <button onClick={handleSearch} disabled={loading}
-            className="px-6 bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-700 disabled:text-zinc-500 text-white rounded py-2 text-sm font-medium transition-colors whitespace-nowrap">
-            {loading ? 'Searching...' : 'Discover'}
+            className="px-6 bg-accent hover:bg-accent-soft disabled:bg-surface-3 disabled:text-subtle text-white rounded-card py-2 text-sm font-medium transition-colors whitespace-nowrap">
+            {loading ? 'Searching…' : 'Discover'}
           </button>
         </div>
-        {error && <p className="text-red-400 text-xs mt-2">{error}</p>}
+        {error && <p className="text-error text-xs mt-2">{error}</p>}
+        <p className="text-xs text-subtle mt-3">
+          Results persist across refreshes. Top candidates are enriched with transcript-sampled scoring in the background —
+          check back in a few seconds for a <span className="font-mono text-accent">predicted</span> score that reflects the
+          actual video content, not just the title.
+        </p>
       </div>
 
-      {results.length > 0 && (
-        <div className="flex items-center gap-3">
-          <span className="text-sm text-zinc-400">{results.length} videos found</span>
-          {highRelevance > 0 && (
-            <>
-              <span className="text-green-400 text-sm">{highRelevance} high relevance</span>
-              <button onClick={() => handleImportTopN(5)} disabled={loading}
-                className="px-4 py-1.5 rounded text-xs font-medium bg-green-700 text-white hover:bg-green-600 disabled:bg-zinc-700 transition-colors">
-                Import Top 5
-              </button>
-            </>
-          )}
+      {/* Toolbar */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex gap-1 p-1 bg-surface rounded-card border border-line">
+          {(['ACTIVE', 'NEW', 'QUEUED', 'IMPORTED', 'SKIPPED'] as const).map(f => (
+            <button key={f} onClick={() => setFilter(f)}
+              className={`px-3 py-1 text-xs rounded font-medium transition-colors ${
+                filter === f ? 'bg-accent text-white' : 'text-muted hover:text-fg'
+              }`}>
+              {f === 'ACTIVE' ? `All (${newCount + queuedCount})` : f}
+            </button>
+          ))}
+        </div>
+        <div className="flex-1" />
+        {selected.size > 0 && (
+          <button onClick={handleQueueSelected}
+            className="px-3 py-1.5 text-xs font-medium bg-accent text-white rounded-card hover:bg-accent-soft transition-colors">
+            Queue {selected.size} selected
+          </button>
+        )}
+        {queuedCount > 0 && (
+          <button onClick={handleDrain} disabled={draining}
+            className="px-3 py-1.5 text-xs font-medium bg-success text-white rounded-card hover:opacity-90 disabled:bg-surface-3 transition-colors">
+            {draining ? 'Processing…' : `Process queue (${queuedCount})`}
+          </button>
+        )}
+      </div>
+
+      {candidates.length === 0 && (
+        <div className="text-center py-8 text-subtle text-sm border border-line rounded-card bg-surface">
+          {filter === 'ACTIVE'
+            ? 'No candidates yet. Run a search above to populate.'
+            : `No ${filter.toLowerCase()} candidates.`}
         </div>
       )}
 
-      {loading && results.length === 0 && (
-        <div className="text-center py-8 text-zinc-500">
-          <div className="animate-spin inline-block w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full mb-2" />
-          <p>Discovering videos...</p>
-        </div>
-      )}
-
-      {!loading && results.length === 0 && error === null && (
-        <div className="text-center py-8 text-zinc-500">
-          <p>Use the search box above to discover viral-worthy Indonesian videos.</p>
-        </div>
-      )}
-
-      {results.length > 0 && (
-        <div className="space-y-2">
-          {results.map(video => {
-            const isImporting = importingIds.has(video.videoId);
-            const scoreColor = video.relevanceScore >= 0.6 ? 'text-green-400' : video.relevanceScore >= 0.3 ? 'text-yellow-400' : 'text-zinc-500';
-            const scoreBg = video.relevanceScore >= 0.6 ? 'bg-green-600/20 border-green-600/40' : video.relevanceScore >= 0.3 ? 'bg-yellow-600/20 border-yellow-600/40' : 'bg-zinc-800 border-zinc-700';
-            return (
-              <div key={video.videoId} className={`rounded-lg p-4 border flex items-start gap-4 ${scoreBg}`}>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-zinc-200 truncate">{video.title || video.videoId}</p>
-                  <div className="flex items-center gap-3 mt-1 text-xs text-zinc-400">
-                    {video.channel && <span>{video.channel}</span>}
-                    {video.duration > 0 && (
-                      <>{video.duration > 0 && <span>{formatDurationSec(video.duration)}</span>}</>
-                    )}
-                    {video.viewCount !== null && video.viewCount > 0 && (
-                      <span>{(video.viewCount / 1000).toFixed(1)}K views</span>
-                    )}
-                  </div>
+      <div className="space-y-2">
+        {candidates.map(video => {
+          const score = video.predictedScore ?? video.relevanceScore ?? 0;
+          const hasPredicted = video.predictedScore !== null;
+          const scoreColor = score >= 0.6 ? 'text-success' : score >= 0.3 ? 'text-warning' : 'text-subtle';
+          const isImported = video.status === 'IMPORTED';
+          const isSkipped = video.status === 'SKIPPED';
+          const dim = isImported || isSkipped;
+          const isSelected = selected.has(video.id);
+          const canSelect = video.status === 'NEW';
+          return (
+            <div key={video.id}
+              className={`rounded-card p-4 border flex items-start gap-3 transition-colors ${
+                isSelected ? 'bg-accent-tint border-accent' : 'bg-surface border-line'
+              } ${dim ? 'opacity-60' : ''}`}>
+              {canSelect ? (
+                <input type="checkbox" checked={isSelected} onChange={() => toggleSelect(video.id)}
+                  className="mt-1 accent-accent" />
+              ) : (
+                <div className="w-4" />
+              )}
+              <div className="flex-1 min-w-0">
+                <div className="flex items-baseline gap-2">
+                  <p className="text-sm font-medium text-fg truncate">{video.title || video.youtubeId}</p>
+                  <span className={`text-[10px] font-mono uppercase tracking-wide px-1.5 py-0.5 rounded border ${
+                    video.status === 'NEW' ? 'text-accent bg-accent-tint border-accent/30' :
+                    video.status === 'QUEUED' ? 'text-warning bg-warning-tint border-warning/30' :
+                    video.status === 'IMPORTED' ? 'text-success bg-success-tint border-success/30' :
+                    video.status === 'SKIPPED' ? 'text-subtle bg-surface-2 border-line' :
+                    'text-error bg-error-tint border-error/30'
+                  }`}>{video.status}</span>
                 </div>
-                <div className="flex items-center gap-3 flex-shrink-0">
-                  <span className={`text-sm font-bold ${scoreColor}`}>{(video.relevanceScore * 100).toFixed(0)}%</span>
-                  <button onClick={() => handleImportOne(video)} disabled={isImporting}
-                    className="px-3 py-1.5 rounded text-xs font-medium bg-blue-600 text-white hover:bg-blue-700 disabled:bg-zinc-700 disabled:text-zinc-500 transition-colors">
-                    {isImporting ? '...' : 'Import'}
-                  </button>
+                <div className="flex items-center gap-3 mt-1 text-xs text-muted flex-wrap">
+                  {video.channel && <span>{video.channel}</span>}
+                  {video.duration > 0 && <span>{formatDurationSec(video.duration)}</span>}
+                  {video.viewCount && video.viewCount > 0 && (
+                    <span>{(video.viewCount / 1000).toFixed(1)}K views</span>
+                  )}
+                  {video.sourceMode && <span aria-hidden>&#8226;</span>}
+                  {video.sourceMode && <span className="font-mono text-subtle">{video.sourceMode}</span>}
                 </div>
               </div>
-            );
-          })}
-        </div>
-      )}
+              <div className="flex items-center gap-3 flex-shrink-0">
+                <div className="text-right">
+                  <div className={`text-sm font-mono font-semibold ${scoreColor}`}>
+                    {(score * 100).toFixed(0)}%
+                  </div>
+                  <div className="text-[10px] text-subtle">
+                    {hasPredicted ? 'predicted' : video.transcriptScore === null ? 'enriching…' : 'relevance'}
+                  </div>
+                </div>
+                <a href={video.url} target="_blank" rel="noreferrer"
+                  className="text-xs text-subtle hover:text-accent underline">YT</a>
+                {video.status === 'SKIPPED' ? (
+                  <button onClick={() => handleUnskip(video.id)}
+                    className="px-2 py-1 text-xs text-muted hover:text-fg">Unskip</button>
+                ) : video.status === 'NEW' ? (
+                  <button onClick={() => handleSkip(video.id)}
+                    className="px-2 py-1 text-xs text-subtle hover:text-error transition-colors">Skip</button>
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -612,6 +522,7 @@ export default function Home() {
   const [videoGroups, setVideoGroups] = useState<VideoGroup[]>([]);
   const [clipScores, setClipScores] = useState<Record<string, ClipScore>>({});
   const [previewingClip, setPreviewingClip] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [selectedClips, setSelectedClips] = useState<Set<string>>(new Set());
   const [exporting, setExporting] = useState(false);
   const [expandedVideos, setExpandedVideos] = useState<Set<string>>(new Set());
@@ -619,14 +530,24 @@ export default function Home() {
   const [filterTiers, setFilterTiers] = useState<Record<string, string>>({});
   const [learningStats, setLearningStats] = useState<{ version: number; trained_on: number; total_feedback: number; with_actual_scores: number } | null>(null);
   const [training, setTraining] = useState(false);
-  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollAbortRef = useRef<AbortController | null>(null);
+  const pollDelayRef = useRef<number>(POLL_MIN_MS);
+  const pollLastStageRef = useRef<string | null>(null);
   const [initialLoad, setInitialLoad] = useState(true);
+  const [globalError, setGlobalError] = useState<{ msg: string; ctx: string } | null>(null);
 
   const stopPolling = useCallback(() => {
-    if (pollIntervalRef.current) {
-      clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
+    if (pollTimerRef.current) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
     }
+    if (pollAbortRef.current) {
+      pollAbortRef.current.abort();
+      pollAbortRef.current = null;
+    }
+    pollDelayRef.current = POLL_MIN_MS;
+    pollLastStageRef.current = null;
   }, []);
 
   const fetchClipsForVideo = useCallback(async (videoId: string) => {
@@ -638,12 +559,11 @@ export default function Home() {
         try {
           const detail = await api.getClip(clip.id) as ClipDetail;
           if (detail.scoreBreakdown) scores[clip.id] = detail.scoreBreakdown;
-        } catch (_) { /* noop */ }
+        } catch (e) { reportError(e, 'getClip'); }
       }
       setClipScores(prev => ({ ...prev, ...scores }));
       return clipList;
-    } catch (_) { return [];
-    }
+    } catch (e) { reportError(e, 'fetchClipsForVideo'); return []; }
   }, [api]);
 
   const loadAllData = useCallback(async () => {
@@ -668,7 +588,7 @@ export default function Home() {
           try {
             const jd = await api.getJob(job.id) as JobDetail;
             jobDetail = jd;
-          } catch (_) { /* noop */ }
+          } catch (e) { reportError(e, 'getJob'); }
         }
 
         if (job && (job.status === 'COMPLETED' || (runningJob && job.id === runningJob.id))) {
@@ -711,20 +631,35 @@ export default function Home() {
           total_feedback: ws.total_feedback as number,
           with_actual_scores: ws.with_actual_scores as number,
         });
-      } catch (_) { /* noop */ }
-    } catch (_) { /* noop */ }
+      } catch (e) { reportError(e, 'getWeightsStatus'); }
+    } catch (e) { reportError(e, 'loadAllData'); }
     setInitialLoad(false);
   }, [api, fetchClipsForVideo]);
 
   const pollJob = useCallback(async (jobId: string) => {
+    // Abort any in-flight fetch from the previous tick so we don't pile up.
+    if (pollAbortRef.current) pollAbortRef.current.abort();
+    const ctrl = new AbortController();
+    pollAbortRef.current = ctrl;
+
+    let terminal = false;
     try {
       const data = await api.getJob(jobId) as JobDetail;
+
+      // Stage transition → reset backoff so the UI catches up quickly.
+      const stage = data.job.currentStage || data.job.status;
+      if (pollLastStageRef.current !== null && pollLastStageRef.current !== stage) {
+        pollDelayRef.current = POLL_MIN_MS;
+      }
+      pollLastStageRef.current = stage;
+
       setVideoGroups(prev => prev.map(g => {
         if (g.job?.id !== jobId) return g;
         return { ...g, jobDetail: data };
       }));
 
       if (data.job.status === 'COMPLETED') {
+        terminal = true;
         stopPolling();
         setCurrentJobId(null);
         const clips = await fetchClipsForVideo(data.job.videoId);
@@ -734,6 +669,7 @@ export default function Home() {
         }));
         setExpandedVideos(prev => new Set([...prev, data.job.videoId]));
       } else if (data.job.status === 'FAILED') {
+        terminal = true;
         stopPolling();
         setCurrentJobId(null);
         setVideoGroups(prev => prev.map(g => {
@@ -741,19 +677,35 @@ export default function Home() {
           return { ...g, job: data.job, jobDetail: data };
         }));
       }
-    } catch (_) { /* noop */ }
+    } catch (e) {
+      if (!isAbortError(e)) reportError(e, 'pollJob');
+    } finally {
+      if (!terminal && pollAbortRef.current === ctrl) {
+        // Schedule the next poll with exponential backoff (capped).
+        const next = Math.min(pollDelayRef.current * 2, POLL_MAX_MS);
+        pollDelayRef.current = next;
+        pollTimerRef.current = setTimeout(() => pollJob(jobId), next);
+      }
+    }
   }, [fetchClipsForVideo, stopPolling, api]);
 
   const startPolling = useCallback((jobId: string) => {
-    pollJob(jobId);
     stopPolling();
-    pollIntervalRef.current = setInterval(() => pollJob(jobId), 2000);
+    pollDelayRef.current = POLL_MIN_MS;
+    pollLastStageRef.current = null;
+    pollJob(jobId);
   }, [pollJob, stopPolling]);
 
   useEffect(() => {
     loadAllData();
     return () => stopPolling();
   }, [loadAllData, stopPolling]);
+
+  useEffect(() => {
+    return onError((msg, ctx) => {
+      setGlobalError({ msg, ctx });
+    });
+  }, []);
 
   const handleImport = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -796,7 +748,7 @@ export default function Home() {
       setSelectedClips(new Set());
       const clips = await fetchClipsForVideo(videoId);
       setVideoGroups(prev => prev.map(g => g.video.id === videoId ? { ...g, clips } : g));
-    } catch (_) { /* noop */ } finally {
+    } catch (e) { reportError(e, 'exportClips'); } finally {
       setExporting(false);
     }
   };
@@ -804,27 +756,64 @@ export default function Home() {
   const isActiveJob = currentJobId !== null;
 
   return (
-    <main className="max-w-5xl mx-auto px-4 py-8">
-      <h1 className="text-3xl font-bold mb-2">Viral Clipper</h1>
-      <p className="text-zinc-400 mb-8">AI-powered video clip maker for Indonesian TikTok content</p>
+    <main className="max-w-5xl mx-auto px-6 py-12">
+      <header className="mb-10 border-b border-line pb-6">
+        <h1 className="text-3xl font-bold tracking-tight text-fg mb-1">
+          Viral Clipper
+        </h1>
+        <p className="text-muted text-sm">
+          AI-powered video clip maker for Indonesian TikTok content
+        </p>
+      </header>
 
-      <div className="flex gap-2 mb-6">
-        <button onClick={() => setMainTab('import')} className={`px-6 py-2.5 rounded text-sm font-medium transition-colors ${
-          mainTab === 'import' ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
-        }`}>Import & Clips</button>
-        <button onClick={() => setMainTab('discovery')} className={`px-6 py-2.5 rounded text-sm font-medium transition-colors ${
-          mainTab === 'discovery' ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
-        }`}>Discover</button>
-        <button onClick={() => setMainTab('learning')} className={`px-6 py-2.5 rounded text-sm font-medium transition-colors ${
-          mainTab === 'learning' ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
-        }`}>
-          Learning {learningStats && learningStats.with_actual_scores > 0 ? `(${learningStats.with_actual_scores})` : ''}
-        </button>
-      </div>
+      {globalError && (
+        <div className="mb-6 rounded-card border border-error/30 bg-error-tint px-4 py-3 text-sm text-error flex items-start gap-3">
+          <div className="flex-1">
+            <span className="font-mono text-xs uppercase tracking-wider opacity-70">
+              {globalError.ctx}
+            </span>
+            <p className="mt-0.5">{globalError.msg}</p>
+          </div>
+          <button
+            onClick={() => setGlobalError(null)}
+            className="text-error hover:text-error/70 leading-none text-xl"
+            aria-label="Dismiss error"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
+      <nav className="flex gap-1 mb-8 border-b border-line">
+        {([
+          { key: 'import' as const, label: 'Import & Clips' },
+          { key: 'discovery' as const, label: 'Discover' },
+          {
+            key: 'learning' as const,
+            label: `Learning${
+              learningStats && learningStats.with_actual_scores > 0
+                ? ` (${learningStats.with_actual_scores})`
+                : ''
+            }`,
+          },
+        ]).map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => setMainTab(tab.key)}
+            className={`px-5 py-3 text-sm font-medium transition-colors border-b-2 -mb-px ${
+              mainTab === tab.key
+                ? 'text-fg border-accent'
+                : 'text-muted border-transparent hover:text-fg'
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </nav>
 
       {mainTab === 'import' && (
-      <section className="bg-zinc-900 rounded-lg p-6 mb-8">
-        <h2 className="text-xl font-semibold mb-4">Import Video</h2>
+      <section className="bg-surface rounded-lg p-6 mb-8">
+        <h2 className="text-2xl font-semibold mb-5 text-fg">Import Video</h2>
         <form onSubmit={handleImport} className="flex gap-3">
           <input
             type="text"
@@ -832,36 +821,36 @@ export default function Home() {
             onChange={e => setYoutubeUrl(e.target.value)}
             placeholder="Paste YouTube URL..."
             disabled={importing || isActiveJob}
-            className="flex-1 bg-zinc-800 border border-zinc-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500 disabled:opacity-50"
+            className="flex-1 bg-surface-2 border border-line rounded px-3 py-2 text-sm focus:outline-none focus:border-accent disabled:opacity-50"
           />
           <button
             type="submit"
             disabled={importing || !youtubeUrl.trim() || isActiveJob}
-            className="px-6 bg-blue-600 hover:bg-blue-700 disabled:bg-zinc-700 disabled:text-zinc-500 text-white rounded py-2 text-sm font-medium transition-colors whitespace-nowrap"
+            className="px-6 bg-accent hover:bg-accent/90 disabled:bg-surface-3 disabled:text-subtle text-white rounded py-2 text-sm font-medium transition-colors whitespace-nowrap"
           >
             {importing ? 'Importing...' : isActiveJob ? 'Processing...' : 'Import & Process'}
           </button>
         </form>
-        {importError && <p className="text-red-400 text-xs mt-2">{importError}</p>}
+        {importError && <p className="text-error text-xs mt-2">{importError}</p>}
        </section>
       )}
 
       {mainTab === 'import' && initialLoad && (
-        <div className="text-center py-12 text-zinc-500">
-          <div className="animate-spin inline-block w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full mb-2" />
+        <div className="text-center py-12 text-subtle">
+          <div className="animate-spin inline-block w-6 h-6 border-2 border-accent border-t-transparent rounded-full mb-2" />
           <p>Loading...</p>
         </div>
       )}
 
       {mainTab === 'import' && !initialLoad && videoGroups.length === 0 && (
-        <div className="text-center py-12 text-zinc-500">
+        <div className="text-center py-12 text-subtle">
           <p>No videos yet. Import a YouTube URL above to get started.</p>
         </div>
       )}
 
       {mainTab === 'import' && !initialLoad && videoGroups.length > 0 && (
         <section>
-          <h2 className="text-xl font-semibold mb-4">Videos ({videoGroups.length})</h2>
+          <h2 className="text-2xl font-semibold mb-5 text-fg">Videos ({videoGroups.length})</h2>
           <div className="space-y-4">
             {videoGroups.map(group => {
               const isExpanded = expandedVideos.has(group.video.id);
@@ -877,48 +866,48 @@ export default function Home() {
               };
 
               return (
-                <div key={group.video.id} className={`bg-zinc-900 rounded-lg border transition-colors ${
-                  isRunning ? 'border-blue-600/50' : 'border-zinc-800'
+                <div key={group.video.id} className={`bg-surface rounded-lg border transition-colors ${
+                  isRunning ? 'border-accent/50' : 'border-line'
                 }`}>
                   <button
                     onClick={() => toggleExpanded(group.video.id)}
-                    className="w-full px-5 py-4 flex items-center gap-4 text-left hover:bg-zinc-800/50 transition-colors"
+                    className="w-full px-5 py-4 flex items-center gap-4 text-left hover:bg-surface-2 transition-colors"
                   >
                     <span className={`text-lg transition-transform ${isExpanded ? 'rotate-90' : ''}`}>&#9654;</span>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-1">
-                        <span className={`w-2 h-2 rounded-full ${STATUS_COLORS[group.job?.status || 'PENDING'] || 'bg-zinc-500'}`} />
-                        <span className="text-sm font-medium text-zinc-200 truncate">
+                        <span className={`w-2 h-2 rounded-full ${STATUS_COLORS[group.job?.status || 'PENDING'] || 'bg-subtle'}`} />
+                        <span className="text-sm font-medium text-fg truncate">
                           {group.video.title || group.video.sourceUrl || group.video.id.substring(0, 8)}
                         </span>
-                        <span className="text-xs text-zinc-500">{timeAgo(group.video.createdAt)}</span>
+                        <span className="text-xs text-subtle">{timeAgo(group.video.createdAt)}</span>
                       </div>
-                      <div className="flex items-center gap-3 text-xs text-zinc-500">
+                      <div className="flex items-center gap-3 text-xs text-subtle">
                         <span>{group.job?.status || 'No job'}</span>
                         {group.clips.length > 0 && (
                           <>
-                            <span>\u2022</span>
+                            <span aria-hidden>&#8226;</span>
                             <span>{group.clips.length} clips</span>
-                            {tierCounts.PRIMARY > 0 && <span className="text-green-400">{tierCounts.PRIMARY} viral</span>}
-                            {tierCounts.BACKUP > 0 && <span className="text-yellow-400">{tierCounts.BACKUP} potential</span>}
+                            {tierCounts.PRIMARY > 0 && <span className="text-success">{tierCounts.PRIMARY} viral</span>}
+                            {tierCounts.BACKUP > 0 && <span className="text-warning">{tierCounts.BACKUP} potential</span>}
                           </>
                         )}
                         {isRunning && group.jobDetail && (
                           <>
-                            <span>\u2022</span>
-                            <span className="text-blue-400">
+                            <span aria-hidden>&#8226;</span>
+                            <span className="text-accent">
                               {Math.round(group.jobDetail.stages.filter(s => s.status === 'COMPLETED').length / STAGE_ORDER.length * 100)}% complete
                             </span>
                           </>
                         )}
                       </div>
                     </div>
-                    <span className="text-xs text-zinc-500">{isExpanded ? 'Collapse' : 'Expand'}</span>
+                    <span className="text-xs text-subtle">{isExpanded ? 'Collapse' : 'Expand'}</span>
                     {group.job && (group.job.status === 'RUNNING' || group.job.status === 'QUEUED') && (
                       <button onClick={async (e) => {
                         e.stopPropagation();
-                        try { await api.cancelJob(group.job!.id); await loadAllData(); } catch (_) { /* noop */ }
-                      }} className="ml-2 px-3 py-1 rounded text-xs font-medium bg-orange-600 text-white hover:bg-orange-500 transition-colors">
+                        try { await api.cancelJob(group.job!.id); await loadAllData(); } catch (e) { reportError(e, 'cancelJob'); }
+                      }} className="ml-2 px-3 py-1 rounded text-xs font-medium bg-warning text-white hover:bg-warning/90 transition-colors">
                         Cancel
                       </button>
                     )}
@@ -926,56 +915,56 @@ export default function Home() {
                       <button onClick={async (e) => {
                         e.stopPropagation();
                         if (confirm('Delete this video and all its clips?')) {
-                          try { await api.deleteVideo(group.video.id); await loadAllData(); } catch (_) { /* noop */ }
+                          try { await api.deleteVideo(group.video.id); await loadAllData(); } catch (e) { reportError(e, 'deleteVideo'); }
                         }
-                      }} className="ml-2 px-3 py-1 rounded text-xs font-medium bg-red-700 text-white hover:bg-red-600 transition-colors">
+                      }} className="ml-2 px-3 py-1 rounded text-xs font-medium bg-error text-white hover:bg-error/90 transition-colors">
                         Delete
                       </button>
                     )}
                   </button>
 
                   {isExpanded && (
-                    <div className="border-t border-zinc-800">
+                    <div className="border-t border-line">
                       {isRunning && group.jobDetail && (
-                        <div className="px-5 py-4 bg-zinc-800/30">
+                        <div className="px-5 py-4 bg-surface-2/30">
                           <ProgressBar stages={group.jobDetail.stages} />
                           {group.jobDetail.job.errorMessage && (
-                            <p className="text-red-400 text-xs mt-2">{group.jobDetail.job.errorMessage}</p>
+                            <p className="text-error text-xs mt-2">{group.jobDetail.job.errorMessage}</p>
                           )}
                         </div>
                       )}
 
                       {group.clips.length > 0 && (
                         <div className="px-5 py-4">
-                          <div className="flex items-center gap-2 mb-4 border-b border-zinc-800">
+                          <div className="flex items-center gap-2 mb-4 border-b border-line">
                             <button
                               onClick={() => setTab(group.video.id, 'clips')}
                               className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                                tab === 'clips' ? 'border-blue-500 text-blue-400' : 'border-transparent text-zinc-500 hover:text-zinc-300'
+                                tab === 'clips' ? 'border-accent text-accent' : 'border-transparent text-subtle hover:text-fg/85'
                               }`}
                             >Clips ({group.clips.length})</button>
                             <button
                               onClick={() => setTab(group.video.id, 'transcript')}
                               className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                                tab === 'transcript' ? 'border-blue-500 text-blue-400' : 'border-transparent text-zinc-500 hover:text-zinc-300'
+                                tab === 'transcript' ? 'border-accent text-accent' : 'border-transparent text-subtle hover:text-fg/85'
                               }`}
                             >Transcript</button>
                             <div className="ml-auto flex gap-1">
                               {['ALL', 'PRIMARY', 'BACKUP', 'SKIP'].map(tier => (
                                 <button key={tier} onClick={() => setFilter(group.video.id, tier)} className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
-                                  filterTier === tier ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700'
+                                  filterTier === tier ? 'bg-accent text-white' : 'bg-surface-2 text-muted hover:bg-surface-3'
                                 }`}>{tier === 'ALL' ? 'All' : tierLabel(tier)}</button>
                               ))}
                             </div>
                           </div>
 
                           {selectedClips.size > 0 && hasRendered && (
-                            <div className="flex items-center gap-3 mb-4 bg-zinc-800/50 rounded-lg p-3">
-                              <span className="text-sm text-zinc-400">{selectedClips.size} selected</span>
-                              <button onClick={() => handleExportSelected(group.video.id)} disabled={exporting} className="px-4 py-1.5 rounded text-xs font-medium bg-green-700 text-white hover:bg-green-600 disabled:bg-zinc-700 transition-colors">
+                            <div className="flex items-center gap-3 mb-4 bg-surface-2 rounded-lg p-3">
+                              <span className="text-sm text-muted">{selectedClips.size} selected</span>
+                              <button onClick={() => handleExportSelected(group.video.id)} disabled={exporting} className="px-4 py-1.5 rounded text-xs font-medium bg-success text-white hover:bg-success/90 disabled:bg-surface-3 transition-colors">
                                 {exporting ? 'Exporting...' : 'Export Selected'}
                               </button>
-                              <button onClick={() => setSelectedClips(new Set())} className="px-3 py-1.5 rounded text-xs font-medium bg-zinc-800 text-zinc-400 hover:bg-zinc-700 transition-colors">Clear</button>
+                              <button onClick={() => setSelectedClips(new Set())} className="px-3 py-1.5 rounded text-xs font-medium bg-surface-2 text-muted hover:bg-surface-3 transition-colors">Clear</button>
                             </div>
                           )}
 
@@ -990,12 +979,12 @@ export default function Home() {
                                     if (next.has(clip.id)) next.delete(clip.id); else next.add(clip.id);
                                     setSelectedClips(next);
                                   }}
-                                  onPreview={() => setPreviewingClip(previewingClip === clip.id ? null : clip.id)}
+                                  onPreview={() => { setPreviewError(null); setPreviewingClip(previewingClip === clip.id ? null : clip.id); }}
                                   onExport={() => {
                                     api.exportClips([clip.id]).then(async () => {
                                       const clips = await fetchClipsForVideo(group.video.id);
                                       setVideoGroups(prev => prev.map(g => g.video.id === group.video.id ? { ...g, clips } : g));
-                                    });
+                                    }).catch(() => {});
                                   }} api={api} />
                               ))}
                             </div>
@@ -1006,28 +995,28 @@ export default function Home() {
                           )}
 
                           {filteredClips.length === 0 && tab === 'clips' && (
-                            <p className="text-zinc-500 text-sm py-8 text-center">No clips match this filter.</p>
+                            <p className="text-subtle text-sm py-8 text-center">No clips match this filter.</p>
                           )}
                         </div>
                       )}
 
                       {!isRunning && group.clips.length === 0 && group.job?.status === 'COMPLETED' && (
-                        <div className="px-5 py-8 text-center text-zinc-500 text-sm">
+                        <div className="px-5 py-8 text-center text-subtle text-sm">
                           Pipeline completed but no clips were generated. The video may be too short or no segments met the minimum duration.
                         </div>
                       )}
 
                       {!isRunning && !group.job && (
-                        <div className="px-5 py-8 text-center text-zinc-500 text-sm">
+                        <div className="px-5 py-8 text-center text-subtle text-sm">
                           Video imported but not processed yet.
                         </div>
                       )}
 
                       {!isRunning && group.job?.status === 'FAILED' && (
                         <div className="px-5 py-4">
-                          <div className="bg-red-900/20 border border-red-800/50 rounded p-3">
-                            <p className="text-red-400 text-sm font-medium mb-1">Pipeline Failed</p>
-                            <p className="text-red-300/70 text-xs">{group.job.errorMessage || 'Unknown error'}</p>
+                          <div className="bg-error-tint border border-error/30 rounded p-3">
+                            <p className="text-error text-sm font-medium mb-1">Pipeline Failed</p>
+                            <p className="text-error/70 text-xs">{group.job.errorMessage || 'Unknown error'}</p>
                           </div>
                         </div>
                       )}
@@ -1042,39 +1031,40 @@ export default function Home() {
 
       {mainTab === 'discovery' && (
         <DiscoveryPanel api={api} onImport={async (url) => {
+          // Legacy one-off import path retained for callers, but the panel's
+          // primary flow is now Queue → Drain → automatic import via backend.
           const importData = await api.importVideo(url) as { videoId: string };
           const processData = await api.startProcessing(importData.videoId) as { jobId: string };
           setCurrentJobId(processData.jobId);
           startPolling(processData.jobId);
-          setMainTab('import');
           await loadAllData();
         }} />
       )}
 
       {mainTab === 'learning' && (
         <section className="space-y-4">
-          <div className="bg-zinc-900 rounded-lg p-6">
-            <h2 className="text-xl font-semibold mb-4">Self-Learning Scoring</h2>
-            <p className="text-sm text-zinc-400 mb-4">
+          <div className="bg-surface rounded-lg p-6">
+            <h2 className="text-2xl font-semibold mb-5 text-fg">Self-Learning Scoring</h2>
+            <p className="text-sm text-muted mb-4">
               Submit TikTok performance data for your clips to train the scoring weights. After enough feedback, the system will automatically adjust which features matter most.
             </p>
             {learningStats && (
               <div className="grid grid-cols-4 gap-4 mb-6">
-                <div className="bg-zinc-800 rounded-lg p-4 text-center">
-                  <div className="text-2xl font-bold text-zinc-100">{learningStats.total_feedback}</div>
-                  <div className="text-xs text-zinc-500">Total Feedback</div>
+                <div className="bg-surface-2 rounded-lg p-4 text-center">
+                  <div className="text-2xl font-bold text-fg">{learningStats.total_feedback}</div>
+                  <div className="text-xs text-subtle">Total Feedback</div>
                 </div>
-                <div className="bg-zinc-800 rounded-lg p-4 text-center">
-                  <div className="text-2xl font-bold text-green-400">{learningStats.with_actual_scores}</div>
-                  <div className="text-xs text-zinc-500">With TikTok Data</div>
+                <div className="bg-surface-2 rounded-lg p-4 text-center">
+                  <div className="text-2xl font-bold text-success">{learningStats.with_actual_scores}</div>
+                  <div className="text-xs text-subtle">With TikTok Data</div>
                 </div>
-                <div className="bg-zinc-800 rounded-lg p-4 text-center">
-                  <div className="text-2xl font-bold text-blue-400">v{learningStats.version}</div>
-                  <div className="text-xs text-zinc-500">Weight Version</div>
+                <div className="bg-surface-2 rounded-lg p-4 text-center">
+                  <div className="text-2xl font-bold text-accent">v{learningStats.version}</div>
+                  <div className="text-xs text-subtle">Weight Version</div>
                 </div>
-                <div className="bg-zinc-800 rounded-lg p-4 text-center">
-                  <div className="text-2xl font-bold text-yellow-400">{learningStats.trained_on}</div>
-                  <div className="text-xs text-zinc-500">Trained Samples</div>
+                <div className="bg-surface-2 rounded-lg p-4 text-center">
+                  <div className="text-2xl font-bold text-warning">{learningStats.trained_on}</div>
+                  <div className="text-xs text-subtle">Trained Samples</div>
                 </div>
               </div>
             )}
@@ -1094,11 +1084,11 @@ export default function Home() {
                   setTraining(false);
                 }
               }} disabled={training || !learningStats || learningStats.with_actual_scores < 5}
-                className="px-6 py-2.5 rounded text-sm font-medium bg-blue-600 text-white hover:bg-blue-500 disabled:bg-zinc-700 disabled:text-zinc-500 transition-colors">
+                className="px-6 py-2.5 rounded text-sm font-medium bg-accent text-white hover:bg-accent/90 disabled:bg-surface-3 disabled:text-subtle transition-colors">
                 {training ? 'Training...' : 'Retrain Weights'}
               </button>
               {learningStats && learningStats.with_actual_scores < 5 && (
-                <span className="text-xs text-zinc-500 py-2">
+                <span className="text-xs text-subtle py-2">
                   Need {5 - learningStats.with_actual_scores} more clips with feedback data to enable training
                 </span>
               )}
@@ -1109,13 +1099,26 @@ export default function Home() {
 
       {previewingClip && (
         <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
-          <div className="bg-zinc-900 rounded-lg max-w-sm w-full overflow-hidden">
-            <div className="flex items-center justify-between p-4 border-b border-zinc-800">
-              <h3 className="text-lg font-semibold">Preview</h3>
-              <button onClick={() => setPreviewingClip(null)} className="text-zinc-400 hover:text-zinc-200">&#10005;</button>
+          <div className="bg-surface rounded-lg max-w-sm w-full overflow-hidden">
+            <div className="flex items-center justify-between p-4 border-b border-line">
+              <h3 className="text-lg font-semibold text-fg">Preview</h3>
+              <button onClick={() => { setPreviewingClip(null); setPreviewError(null); }} className="text-muted hover:text-fg">&#10005;</button>
             </div>
             <div className="aspect-[9/16] bg-black flex items-center justify-center">
-              <video src={api.getPreviewUrl(previewingClip)} controls autoPlay className="max-h-full max-w-full" />
+              {previewError ? (
+                <div className="text-center p-4">
+                  <p className="text-error text-sm">{previewError}</p>
+                  <p className="text-subtle text-xs mt-2">The clip may need to be re-rendered</p>
+                </div>
+              ) : (
+                <video
+                  src={api.getPreviewUrl(previewingClip)}
+                  controls
+                  autoPlay
+                  className="max-h-full max-w-full"
+                  onError={() => setPreviewError('Unable to play this clip')}
+                />
+              )}
             </div>
           </div>
         </div>

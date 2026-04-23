@@ -1,19 +1,21 @@
 {
-  "version": 2,
+  "version": 3,
   "trained_on": 0,
-  "last_updated": "2026-04-19T00:00:00Z",
+  "last_updated": "2026-04-21T00:00:00Z",
   "weights": {
-    "hookStrength": 0.18,
-    "keywordTrigger": 0.09,
-    "novelty": 0.09,
-    "clarity": 0.10,
-    "emotionalEnergy": 0.09,
+    "hookStrength": 0.17,
+    "keywordTrigger": 0.08,
+    "novelty": 0.08,
+    "clarity": 0.09,
+    "emotionalEnergy": 0.08,
     "textSentiment": 0.05,
-    "pauseStructure": 0.07,
-    "facePresence": 0.10,
-    "sceneChange": 0.08,
-    "topicFit": 0.08,
-    "historyScore": 0.07
+    "pauseStructure": 0.06,
+    "facePresence": 0.09,
+    "sceneChange": 0.07,
+    "topicFit": 0.07,
+    "historyScore": 0.06,
+    "motion": 0.05,
+    "onsetDensity": 0.05
   },
   "thresholds": {
     "PRIMARY": 0.80,

@@ -1,25 +1,67 @@
 #!/usr/bin/env python3
-"""Burn word-level subtitles into rendered clips using ffmpeg drawtext."""
+"""Burn word-level subtitles into rendered clips using ffmpeg drawtext.
+
+NVENC-first with libx264 fallback, same pattern as render.py. drawtext is
+CPU-only so we leave decode CPU-side (no -hwaccel) to avoid an extra GPU↔CPU
+copy; the encode is GPU. ``format=yuv420p`` is appended to the filter chain
+so NVENC H.264 never sees a 10-bit / 4:4:4 input.
+"""
 
 import argparse
 import json
 import os
 import subprocess
 import sys
+import tempfile
+
+
+_NVENC_CACHE = None
 
 
 def find_ffmpeg():
     return os.environ.get("FFMPEG_PATH", "ffmpeg")
 
 
-def _detect_nvenc(ffmpeg_path):
+def _probe_nvenc(ffmpeg_path):
+    global _NVENC_CACHE
+    if _NVENC_CACHE is not None:
+        return _NVENC_CACHE
     try:
-        result = subprocess.run(
-            [ffmpeg_path, "-encoders"], capture_output=True, text=True, timeout=5
+        listing = subprocess.run(
+            [ffmpeg_path, "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=5,
         )
-        return "h264_nvenc" in result.stdout
+        if "h264_nvenc" not in listing.stdout:
+            _NVENC_CACHE = False
+            return False
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            probe_out = tmp.name
+        try:
+            probe = subprocess.run(
+                [
+                    ffmpeg_path, "-hide_banner", "-loglevel", "error",
+                    "-f", "lavfi",
+                    "-i", "testsrc=size=128x128:rate=1:duration=1",
+                    "-vf", "format=yuv420p",
+                    "-c:v", "h264_nvenc", "-preset", "p4",
+                    "-frames:v", "1", "-y", probe_out,
+                ],
+                capture_output=True, text=True, timeout=10,
+            )
+            _NVENC_CACHE = probe.returncode == 0
+        finally:
+            try:
+                os.remove(probe_out)
+            except OSError:
+                pass
+        return _NVENC_CACHE
     except Exception:
+        _NVENC_CACHE = False
         return False
+
+
+def _detect_nvenc(ffmpeg_path):
+    return _probe_nvenc(ffmpeg_path)
 
 
 def escape_drawtext(text):
@@ -95,30 +137,52 @@ def build_subtitle_filter(words, max_chars=3, fontsize=52):
     return ",".join(filters)
 
 
+def _build_burn_cmd(ffmpeg_path, render_path, subtitle_filter, output_path, use_nvenc):
+    if not subtitle_filter or subtitle_filter == "null":
+        vf = "format=yuv420p"
+    else:
+        vf = f"{subtitle_filter},format=yuv420p"
+    cmd = [
+        ffmpeg_path, "-hide_banner", "-loglevel", "error",
+        "-i", render_path,
+        "-vf", vf,
+    ]
+    if use_nvenc:
+        cmd.extend([
+            "-c:v", "h264_nvenc",
+            "-preset", "p4", "-tune", "hq",
+            "-rc", "vbr", "-cq", "23", "-b:v", "0",
+        ])
+    else:
+        cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23"])
+    cmd.extend(["-c:a", "copy", "-y", output_path])
+    return cmd
+
+
 def burn_subtitles(render_path, subtitle_filter, output_path, ffmpeg_path=None):
     if ffmpeg_path is None:
         ffmpeg_path = find_ffmpeg()
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    use_nvenc = _detect_nvenc(ffmpeg_path)
-
-    cmd = [
-        ffmpeg_path,
-        "-i", render_path,
-        "-vf", subtitle_filter,
-        "-c:v", "h264_nvenc" if use_nvenc else "libx264",
-    ]
-
-    if use_nvenc:
-        cmd.extend(["-preset", "p4", "-rc", "vbr", "-cq", "23"])
-    else:
-        cmd.extend(["-preset", "fast", "-crf", "23"])
-
-    cmd.extend(["-c:a", "copy", "-y", output_path])
-
+    use_nvenc = _probe_nvenc(ffmpeg_path)
+    cmd = _build_burn_cmd(ffmpeg_path, render_path, subtitle_filter, output_path, use_nvenc)
     result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0 and use_nvenc:
+        print(
+            f"WARN: h264_nvenc failed burning {output_path}, falling back to libx264. "
+            f"stderr={result.stderr[-400:]}",
+            file=sys.stderr,
+        )
+        cmd = _build_burn_cmd(
+            ffmpeg_path, render_path, subtitle_filter, output_path, use_nvenc=False,
+        )
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg subtitle burn failed: {result.stderr[-500:]}")
+        raise RuntimeError(
+            f"ffmpeg subtitle burn failed (cmd={' '.join(cmd)}): {result.stderr[-500:]}"
+        )
     return output_path
 
 
@@ -129,6 +193,7 @@ def main():
     parser.add_argument("--render-dir", required=True, help="Directory with rendered clips")
     parser.add_argument("--output-dir", required=True, help="Directory for exported clips with subtitles")
     parser.add_argument("--tiers", default="PRIMARY,BACKUP", help="Comma-separated tiers to subtitle")
+    parser.add_argument("--clip-index", type=int, default=-1, help="Subtitle only this clip index (0-based)")
     args = parser.parse_args()
 
     try:
@@ -141,6 +206,12 @@ def main():
         word_segments = transcript.get("segments", [])
         scored_segments = segments_data.get("scoredSegments", [])
         to_subtitle = [s for s in scored_segments if s.get("tier") in tiers]
+
+        if args.clip_index >= 0:
+            if args.clip_index < len(to_subtitle):
+                to_subtitle = [to_subtitle[args.clip_index]]
+            else:
+                to_subtitle = []
 
         os.makedirs(args.output_dir, exist_ok=True)
         exported = []
@@ -165,6 +236,13 @@ def main():
 
             try:
                 burn_subtitles(render_path, subtitle_filter, output_path)
+                if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+                    exported.append({
+                        "rank": clip_id,
+                        "status": "FAILED",
+                        "error": "Subtitle burn produced empty file",
+                    })
+                    continue
                 exported.append({
                     "rank": clip_id,
                     "path": output_path,
@@ -172,9 +250,10 @@ def main():
                     "wordCount": len(words),
                 })
             except Exception as e:
+                if os.path.exists(output_path) and os.path.getsize(output_path) == 0:
+                    os.remove(output_path)
                 exported.append({
                     "rank": clip_id,
-                    "path": output_path,
                     "status": "FAILED",
                     "error": str(e),
                 })

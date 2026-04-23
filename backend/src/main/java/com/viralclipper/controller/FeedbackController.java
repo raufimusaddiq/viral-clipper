@@ -6,7 +6,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -22,21 +21,37 @@ public class FeedbackController {
     @PostMapping("/clips/{clipId}/feedback")
     public ResponseEntity<Map<String, Object>> submitFeedback(
             @PathVariable String clipId,
-            @RequestBody Map<String, Integer> body) {
+            @RequestBody Map<String, Object> body) {
         try {
-            int views = body.getOrDefault("views", 0);
-            int likes = body.getOrDefault("likes", 0);
-            int comments = body.getOrDefault("comments", 0);
-            int shares = body.getOrDefault("shares", 0);
-            int saves = body.getOrDefault("saves", 0);
+            // postedAt is REQUIRED — the viral score is normalized by time on
+            // platform, so raw metrics without a timestamp are meaningless.
+            Object postedAtObj = body.get("postedAt");
+            if (postedAtObj == null || postedAtObj.toString().isBlank()) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "status", "error",
+                        "error", "postedAt is required (ISO-8601 timestamp of TikTok upload)"
+                ));
+            }
 
-            ClipFeedback fb = feedbackService.submitTikTokMetrics(clipId, views, likes, comments, shares, saves);
+            int views = intValue(body.get("views"));
+            int likes = intValue(body.get("likes"));
+            int comments = intValue(body.get("comments"));
+            int shares = intValue(body.get("shares"));
+            int saves = intValue(body.get("saves"));
+
+            ClipFeedback fb = feedbackService.submitTikTokMetrics(
+                    clipId, views, likes, comments, shares, saves, postedAtObj.toString());
+
             Map<String, Object> data = new HashMap<>();
             data.put("clipId", fb.getClipId());
             data.put("viralScore", fb.getActualViralScore());
             data.put("views", fb.getTiktokViews());
             data.put("likes", fb.getTiktokLikes());
+            data.put("postedAt", fb.getPostedAt());
             return ResponseEntity.ok(Map.of("status", "ok", "data", data));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest()
+                    .body(Map.of("status", "error", "error", e.getMessage()));
         } catch (Exception e) {
             return ResponseEntity.status(500)
                     .body(Map.of("status", "error", "error", e.getMessage()));
@@ -63,5 +78,11 @@ public class FeedbackController {
             return ResponseEntity.status(500)
                     .body(Map.of("status", "error", "error", e.getMessage()));
         }
+    }
+
+    private static int intValue(Object v) {
+        if (v == null) return 0;
+        if (v instanceof Number n) return n.intValue();
+        try { return Integer.parseInt(v.toString()); } catch (NumberFormatException e) { return 0; }
     }
 }

@@ -5,6 +5,9 @@ module.exports = {
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',
   },
+  // Jest must not try to run the Playwright e2e suite — those tests call
+  // Playwright's own `test` function and crash when imported here.
+  testPathIgnorePatterns: ['/node_modules/', '/e2e/', '/.next/'],
   setupFilesAfterEnv: ['<rootDir>/jest.setup.ts'],
   collectCoverageFrom: [
     'src/**/*.{ts,tsx}',
