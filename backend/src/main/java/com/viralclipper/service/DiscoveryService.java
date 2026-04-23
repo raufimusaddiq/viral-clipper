@@ -177,6 +177,13 @@ public class DiscoveryService {
             d.setSourceQuery(query);
             d.setRelevanceScore(v.path("relevanceScore").asDouble(0));
 
+            // v2 fields: channel_id FK, heuristic content-type, clip-likeness flag.
+            String channelId = v.path("channelId").asText("");
+            if (!channelId.isBlank()) d.setChannelId(channelId);
+            String ctype = v.path("contentType").asText("");
+            if (!ctype.isBlank()) d.setContentType(ctype);
+            d.setIsLikelyClipped(v.path("isLikelyClipped").asBoolean(false) ? 1 : 0);
+
             // Dedup against already-imported library. If the YouTube id matches
             // the source_url of an existing Video row, flag as IMPORTED so the
             // UI can de-emphasize it.
@@ -312,6 +319,10 @@ public class DiscoveryService {
         m.put("jobId", d.getJobId());
         m.put("sourceMode", d.getSourceMode());
         m.put("sourceQuery", d.getSourceQuery());
+        m.put("channelId", d.getChannelId());
+        m.put("contentType", d.getContentType());
+        m.put("speechDensityWpm", d.getSpeechDensityWpm());
+        m.put("isLikelyClipped", d.getIsLikelyClipped() != null && d.getIsLikelyClipped() == 1);
         return m;
     }
 }

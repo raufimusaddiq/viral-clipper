@@ -147,3 +147,18 @@ CREATE INDEX IF NOT EXISTS idx_discovered_status_score ON discovered_video(statu
 CREATE INDEX IF NOT EXISTS idx_discovered_status_relevance ON discovered_video(status, relevance_score DESC);
 CREATE INDEX IF NOT EXISTS idx_discovered_youtube_id ON discovered_video(youtube_id);
 CREATE INDEX IF NOT EXISTS idx_discovery_query_active ON discovery_query(active, last_run_at);
+
+-- Discovery v2 additions. channel_id lets us group candidates by source channel
+-- (foreign key to discovery_channel once that table lands). content_type is a
+-- heuristic classification from classify_content_type (PODCAST/TALKSHOW/etc).
+-- is_likely_clipped flags re-upload/compilation videos so UI can demote them.
+-- speech_density_wpm is computed from transcript length / duration and
+-- distinguishes "podcast" (~140 wpm) from "music video" (~20 wpm).
+-- continue-on-error: true in application.yml swallows duplicate-column errors
+-- on re-run.
+ALTER TABLE discovered_video ADD COLUMN channel_id TEXT;
+ALTER TABLE discovered_video ADD COLUMN content_type TEXT;
+ALTER TABLE discovered_video ADD COLUMN speech_density_wpm REAL;
+ALTER TABLE discovered_video ADD COLUMN is_likely_clipped INTEGER DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_discovered_channel ON discovered_video(channel_id);
+CREATE INDEX IF NOT EXISTS idx_discovered_content_type ON discovered_video(content_type);

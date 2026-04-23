@@ -64,6 +64,18 @@ public class DiscoveredVideo {
     @Column(name = "enriched_at")
     private String enrichedAt;
 
+    @Column(name = "channel_id")
+    private String channelId;
+
+    @Column(name = "content_type")
+    private String contentType;
+
+    @Column(name = "speech_density_wpm")
+    private Double speechDensityWpm;
+
+    @Column(name = "is_likely_clipped")
+    private Integer isLikelyClipped;
+
     public DiscoveredVideo() {}
 
     @PrePersist
@@ -112,4 +124,12 @@ public class DiscoveredVideo {
     public void setDiscoveredAt(String discoveredAt) { this.discoveredAt = discoveredAt; }
     public String getEnrichedAt() { return enrichedAt; }
     public void setEnrichedAt(String enrichedAt) { this.enrichedAt = enrichedAt; }
+    public String getChannelId() { return channelId; }
+    public void setChannelId(String channelId) { this.channelId = channelId; }
+    public String getContentType() { return contentType; }
+    public void setContentType(String contentType) { this.contentType = contentType; }
+    public Double getSpeechDensityWpm() { return speechDensityWpm; }
+    public void setSpeechDensityWpm(Double speechDensityWpm) { this.speechDensityWpm = speechDensityWpm; }
+    public Integer getIsLikelyClipped() { return isLikelyClipped; }
+    public void setIsLikelyClipped(Integer isLikelyClipped) { this.isLikelyClipped = isLikelyClipped; }
 }

@@ -1810,3 +1810,182 @@ class TestShortsDetection:
         import discover
         assert discover.is_short({"url": "", "duration": "30"}) is True
         assert discover.is_short({"url": "", "duration": "120"}) is False
+
+
+class TestDurationFitInverted:
+    """v2 inversion: long-form source material must outrank already-clipped videos."""
+
+    def test_long_form_wins(self):
+        import discover
+        # 60 min podcast must score higher than 10 min compilation.
+        assert discover.duration_fit_score(60 * 60) > discover.duration_fit_score(10 * 60)
+        # 2 hr livestream VOD must score at least as high as a 60 min podcast.
+        assert discover.duration_fit_score(120 * 60) >= discover.duration_fit_score(60 * 60)
+
+    def test_short_rejected(self):
+        import discover
+        assert discover.duration_fit_score(60) == 0.0        # 1 min — reject
+        assert discover.duration_fit_score(4 * 60) == 0.0    # 4 min — reject
+        assert discover.duration_fit_score(5 * 60) == 0.15   # 5 min — borderline
+
+    def test_curve_monotonic_through_sweetspot(self):
+        import discover
+        ladder = [
+            discover.duration_fit_score(4 * 60),    # 0.00
+            discover.duration_fit_score(8 * 60),    # 0.15
+            discover.duration_fit_score(12 * 60),   # 0.40
+            discover.duration_fit_score(20 * 60),   # 0.70
+            discover.duration_fit_score(60 * 60),   # 1.00
+        ]
+        assert ladder == sorted(ladder), f"curve not monotonic: {ladder}"
+
+    def test_ultra_long_form_still_prime(self):
+        """4hr livestream VOD — beyond 180-min sweetspot but still clippable."""
+        import discover
+        assert discover.duration_fit_score(4 * 3600) == 1.00
+        assert discover.duration_fit_score(8 * 3600) == 1.00
+
+    def test_relevance_score_favors_podcast_over_compilation(self):
+        """Regression test for the primary v2 bug: compilations used to outrank sources."""
+        import discover
+        podcast = {
+            "title": "Full Podcast Episode with Guest",
+            "description": "",
+            "duration": 90 * 60,
+            "viewCount": 50000,
+            "age_hours": 240,
+        }
+        compilation = {
+            "title": "Podcast Viral Moments with Guest",
+            "description": "",
+            "duration": 12 * 60,
+            "viewCount": 50000,
+            "age_hours": 240,
+        }
+        assert discover.quick_relevance_score(podcast) > discover.quick_relevance_score(compilation)
+
+    def test_predict_clip_potential_rewards_long_form(self):
+        import discover
+        # Same transcript, same velocity, different durations. Long-form wins.
+        long_tscore, long_pscore = discover.predict_clip_potential(
+            transcript="", duration=90 * 60, view_count=10000, age_hours=240
+        )
+        short_tscore, short_pscore = discover.predict_clip_potential(
+            transcript="", duration=8 * 60, view_count=10000, age_hours=240
+        )
+        assert long_pscore > short_pscore
+
+
+class TestAlreadyClippedFilter:
+    def test_clip_keyword_rejected(self):
+        import discover
+        assert discover.looks_already_clipped("Best of Deddy Corbuzier Clips 2026") is True
+        assert discover.looks_already_clipped("Potongan Viral Najwa Shihab") is True
+        assert discover.looks_already_clipped("Top 10 Moments from the Podcast") is True
+        assert discover.looks_already_clipped("Cuplikan Stand Up Comedy Terbaik") is True
+        assert discover.looks_already_clipped("Highlight Debat Capres 2026") is True
+
+    def test_source_material_passes(self):
+        import discover
+        assert discover.looks_already_clipped("Close The Door with Deddy Corbuzier EP. 12") is False
+        assert discover.looks_already_clipped("Curhat Bang Denny Sumargo - Full Episode") is False
+        assert discover.looks_already_clipped("Mata Najwa - Tatap Mata Ahok") is False
+
+    def test_empty_title_is_not_clipped(self):
+        import discover
+        assert discover.looks_already_clipped("") is False
+        assert discover.looks_already_clipped(None) is False
+
+
+class TestContentTypeClassifier:
+    def test_podcast(self):
+        import discover
+        assert discover.classify_content_type(
+            "Close The Door Ep. 42", "Deddy Corbuzier", 90 * 60
+        ) == "PODCAST"
+        assert discover.classify_content_type(
+            "Curhat Bang Denny Sumargo", "Denny Sumargo", 75 * 60
+        ) == "PODCAST"
+
+    def test_podcast_30_to_60_min_fallback(self):
+        """Mid-length podcast (30–60 min) should still classify as PODCAST."""
+        import discover
+        assert discover.classify_content_type(
+            "Ngobrolin Podcast Ep. 5", "Random Channel", 45 * 60
+        ) == "PODCAST"
+
+    def test_talkshow(self):
+        import discover
+        assert discover.classify_content_type(
+            "Mata Najwa - Tatap Mata Ahok", "Narasi", 60 * 60
+        ) == "TALKSHOW"
+        assert discover.classify_content_type(
+            "Hotman Paris Show - Exclusive Interview", "Hotman Paris", 45 * 60
+        ) == "TALKSHOW"
+
+    def test_standup(self):
+        import discover
+        assert discover.classify_content_type(
+            "Stand Up Comedy Special - Pandji", "Pandji Pragiwaksono", 60 * 60
+        ) == "STANDUP"
+        assert discover.classify_content_type(
+            "MLI Open Mic", "Majelis Lucu Indonesia", 30 * 60
+        ) == "STANDUP"
+
+    def test_livestream(self):
+        import discover
+        assert discover.classify_content_type(
+            "Live Streaming Gameplay Session", "Streamer ID", 180 * 60
+        ) == "LIVESTREAM"
+
+    def test_news(self):
+        import discover
+        assert discover.classify_content_type(
+            "Debat Capres 2026 - Segmen 1", "KPU", 45 * 60
+        ) == "NEWS"
+
+    def test_other_fallback(self):
+        import discover
+        assert discover.classify_content_type(
+            "Music Video - Artist Name", "VEVO", 4 * 60
+        ) == "OTHER"
+        # Short "podcast" clip: duration below the threshold, so not PODCAST.
+        assert discover.classify_content_type(
+            "Podcast Clip 1 Minute", "Random", 60
+        ) == "OTHER"
+
+
+class TestNormalizeVideoV2Fields:
+    def test_content_type_and_clip_flag_populated(self):
+        import discover
+        entry = {
+            "id": "abc12345678",
+            "url": "https://www.youtube.com/watch?v=abc12345678",
+            "title": "Close The Door Ep. 99 - Special Guest",
+            "channel": "Deddy Corbuzier",
+            "channel_id": "UCxxx",
+            "duration": 95 * 60,
+            "view_count": 500000,
+            "upload_date": "20260420",
+            "description": "",
+        }
+        v = discover.normalize_video(entry)
+        assert v["contentType"] == "PODCAST"
+        assert v["isLikelyClipped"] is False
+        assert v["channelId"] == "UCxxx"
+
+    def test_clipped_title_flagged(self):
+        import discover
+        entry = {
+            "id": "xyz12345678",
+            "url": "https://www.youtube.com/watch?v=xyz12345678",
+            "title": "Best of Deddy Corbuzier - Top 10 Moments",
+            "channel": "Clip Farm",
+            "channel_id": "UCyyy",
+            "duration": 12 * 60,
+            "view_count": 1000000,
+            "upload_date": "20260420",
+            "description": "",
+        }
+        v = discover.normalize_video(entry)
+        assert v["isLikelyClipped"] is True
